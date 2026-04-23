@@ -1,0 +1,44 @@
+.qtcreator/
+build/
+
+# Qt Creator user files
+*.pro.user
+*.pro.user.*
+*.creator
+*.creator.user
+*.creator.user.*
+
+# Build artifacts
+*.obj
+*.o
+*.lo
+*.la
+*.a
+*.lib
+*.dll
+*.dylib
+*.so
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.moc
+
+# CMake / qmake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.vcxproj*
+*.sln
+*.ninja
+*.cmake.user
