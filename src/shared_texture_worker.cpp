@@ -7,6 +7,7 @@
 #include "shared_texture_frame_pool.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QMutexLocker>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
@@ -234,6 +235,8 @@ void SharedTextureWorker::requestRender()
     }();
 
     const GLuint textureId = m_framePool->textureIdForSlot(renderSlot);
+    QElapsedTimer renderTimer;
+    renderTimer.start();
     const bool rendered = m_pipeline->renderToTexture(
         m_handle->context(),
         textureId,
@@ -254,11 +257,14 @@ void SharedTextureWorker::requestRender()
         m_handle->context()->functions()->glFinish();
     }
 
+    const double elapsedMs = double(renderTimer.nsecsElapsed()) / 1000000.0;
+
     m_handle->doneCurrent();
     sharedGlesMutex().unlock();
 
     SharedTextureFrame frame;
     if (m_framePool->submitRenderedFrame(renderSlot, size, m_frameIndex, &frame)) {
+        emit renderTimingUpdated(elapsedMs);
         emit textureReady(frame.slotIndex, frame.textureId, frame.size, frame.frameIndex);
         ++m_frameIndex;
         return;

@@ -4,6 +4,8 @@
 
 本文只参考 Qt 官方 Qt 5 归档文档，交叉核对了 Qt 5.12 与 Qt 5.15 页面，不使用 Qt 6 文档。
 
+文中凡写作“Qt 官方明确说明”的内容，均直接对应上述文档原文；凡写作“工程上意味着”“可直接推得”“更适合/不适合”的内容，则是基于这些文档条目做出的实现层判断，不应视为 Qt API 规范本身的额外承诺。
+
 ## 1. 结论先行
 
 如果目标是稳定地嵌入传统 `QWidget` 界面，并与按钮、面板、布局、滚动区域等常规 UI 正常协作，优先使用 `QOpenGLWidget`。
@@ -145,6 +147,8 @@ Qt 官方还特别说明：
 
 但不适合把它误解为“白赚性能”。只有在确实可以避免整帧重绘时，保留前一帧内容才有意义。
 
+Qt 官方还直接指出：由于 `QOpenGLWidget` 本身就是基于 FBO 的，因此它的行为与开启 `PartialUpdateBlit` 或 `PartialUpdateBlend` 的 `QOpenGLWindow` 非常接近。
+
 #### 对工程实现的含义
 
 如果你的渲染逻辑本来就是：
@@ -229,7 +233,51 @@ Qt 官方明确指出：
 
 此时它和 `QOpenGLWidget` 的差异会缩小，只是渲染管线细节不同。
 
-### 4.4 frameSwapped 语义差异
+#### `paintUnderGL()` / `paintOverGL()` 会改变你对“内容保留”的理解
+
+这是 `QOpenGLWindow` 文档里一个很容易被忽略、但对“更新语义”非常关键的点：
+
+- 在 partial update 模式下，`paintGL()` 画向额外 FBO
+- `paintUnderGL()` 和 `paintOverGL()` 无论当前 update behavior 是什么，目标都是窗口默认 framebuffer
+- 在 `PartialUpdateBlend` 下，保留的是 `paintGL()` 所使用的额外 FBO 内容；`paintUnderGL()` / `paintOverGL()` 所画的窗口默认 framebuffer 内容并不会跨帧保留
+- 在 `PartialUpdateBlit` 下，Qt 官方明确提示不要依赖 `paintUnderGL()`，因为 `paintGL()` 使用的额外 FBO 会在随后 blit 到默认 framebuffer，上一步在 `paintUnderGL()` 里直接画到窗口上的内容会被覆盖
+
+这意味着：
+
+- `QOpenGLWindow` 的“partial update”不是一个对整窗所有绘制路径一视同仁的“统一保留开关”
+- 真正被保留的是 `paintGL()` 的额外 FBO 内容
+- 如果你的渲染架构依赖“背景层 + 增量前景层”，那么 `PartialUpdateBlit` 与 `PartialUpdateBlend` 的可见结果和可用写法并不完全相同
+
+#### `grabFramebuffer()` 也能反证默认模式下内容不保留
+
+Qt 官方对 `QOpenGLWindow::grabFramebuffer()` 还有一个很重要的说明：
+
+- 在 `NoPartialUpdate` 下，如果在 front/back buffer 交换之后再调用它，读到的 back buffer 内容可能并不是屏幕上刚显示的内容
+- 因此官方只把 `paintGL()` 或 `paintOverGL()` 作为该模式下安全读取 framebuffer 的位置
+
+这条限制本身也说明了：`NoPartialUpdate` 路径的核心语义，本来就是“交换后不应依赖上一次 back buffer 内容仍然可用”。
+
+### 4.4 resizeGL() 语义差异
+
+这两个类的 `resizeGL()` 名字相同，但语义并不相同。
+
+对于 `QOpenGLWidget`：
+
+- Qt 官方明确说明调用 `resizeGL()` 时，上下文已经 current
+- 相关 framebuffer 也已经绑定好
+
+对于 `QOpenGLWindow`：
+
+- Qt 官方明确说明 `resizeGL()` 只是一个为了兼容 `QOpenGLWidget` 风格而提供的便利函数
+- 调用它时不保证有 current context
+- 官方直接建议尽量不要在这里发 OpenGL 命令；如果确实无法避免，先手动 `makeCurrent()`
+
+这意味着：
+
+- 从 `QOpenGLWidget` 迁移到 `QOpenGLWindow` 时，不能假定 `resizeGL()` 里的 OpenGL 代码可以原样搬过去
+- 对 `QOpenGLWindow` 来说，更稳妥的做法通常是把真正依赖 GL context 的资源更新留在 `paintGL()`，或者显式 `makeCurrent()` 后再做
+
+### 4.5 frameSwapped 语义差异
 
 这两个类都提供 `frameSwapped()`，但触发时机的语义并不完全一样。
 
@@ -240,8 +288,9 @@ Qt 官方明确指出：
 
 对于 `QOpenGLWidget`：
 
-- 它是在顶层窗口完成对各个 widget 的合成，并从顶层窗口的 `swapBuffers()` 返回之后发出
-- 更接近“顶层窗口完成这次 composition”
+- Qt 官方没有把它定义成“该 widget 自己完成一次独立 buffer swap”
+- 官方在线程/合成相关说明里只明确写到：`aboutToCompose()` 与 `frameSwapped()` 分别标记 GUI/main thread 上 composition 的开始与结束
+- 因而更严谨的理解是：它反映的是包含该 widget 的顶层窗口一次合成周期的结束，而不是这个 widget 自己拥有的 onscreen surface 完成了一次独立 swap
 
 因此：
 
@@ -327,9 +376,9 @@ Qt 官方明确写到：
 
 ### 7.2 透明与半透明限制
 
-由于它是 native child window，而不是参与统一 widget 合成的一块纹理，因此透明混排会很受限。
+Qt 官方在 `QOpenGLWidget` 的 alternatives 说明中，把 transparency 与 overlaps、scroll views、MDI areas 并列列为这条路径的限制场景。`QWidget::createWindowContainer()` 页面本身没有进一步展开透明混排的内部机制，但结合它对 embedded window “opaque box” 的定义，工程上应把这条路线视为不适合依赖透明混排的方案。
 
-具体表现通常是：
+工程上通常应假定：
 
 - 想让下面普通 widget 透出来，不适合
 - 想在它上面稳定叠一个半透明 widget，不适合
@@ -427,6 +476,12 @@ Qt 官方在 `QOpenGLWidget` 文档中对 `QOpenGLWindow + createWindowContainer
 
 - `QOpenGLWindow + createWindowContainer()` 不是推荐优先路线
 - 若目标是稳定的跨平台 widget 嵌入显示，应优先选择 `QOpenGLWidget`
+
+这里还需要强调一个严谨边界：
+
+- Qt 官方在该处只说“certain desktop platforms (e.g. macOS) have known issues”
+- 官方并没有在这几个类页面里展开列出 macOS 的完整问题清单
+- 因此如果工程必须在 macOS 上走 `createWindowContainer()`，应以实机验证为准，而不是把其他平台上的经验直接外推
 
 另外，Qt 官方还特别提醒：
 

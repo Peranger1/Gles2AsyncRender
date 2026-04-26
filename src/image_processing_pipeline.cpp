@@ -69,13 +69,22 @@ void ImageProcessingPipeline::release(QOpenGLContext *context)
         m_vertexBuffer = 0U;
     }
 
+    if (m_heavyTextures[0] != 0U || m_heavyTextures[1] != 0U) {
+        m_gl->glDeleteTextures(2, m_heavyTextures);
+        m_heavyTextures[0] = 0U;
+        m_heavyTextures[1] = 0U;
+    }
+
     delete m_program;
     m_program = nullptr;
+    delete m_heavyProgram;
+    m_heavyProgram = nullptr;
     m_gl = nullptr;
     m_imagePaths.clear();
     m_currentIndex = -1;
     m_currentImage = QImage();
     m_uploadedImageSize = QSize();
+    m_heavyTextureSize = QSize();
     m_sourceDirty = false;
 }
 
@@ -203,6 +212,10 @@ bool ImageProcessingPipeline::renderToTexture(QOpenGLContext *context,
     m_program->setUniformValue("u_texture", 0);
     m_program->setUniformValue("u_brightness", parameters.brightness);
     m_program->setUniformValue("u_contrast", parameters.contrast);
+    m_program->setUniformValue("u_stressPreview", qMin(1.0f, float(parameters.heavyGpuPassCount) / 96.0f));
+    m_program->setUniformValue("u_invTargetSize",
+                               QVector2D(1.0f / float(safeTargetSize.width()),
+                                         1.0f / float(safeTargetSize.height())));
 
     m_gl->glActiveTexture(GL_TEXTURE0);
     m_gl->glBindTexture(GL_TEXTURE_2D, m_sourceTexture);
@@ -224,57 +237,147 @@ bool ImageProcessingPipeline::renderToTexture(QOpenGLContext *context,
     m_program->release();
     m_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    if (parameters.heavyGpuPassCount > 0) {
+        if (!runHeavyGpuPasses(targetTexture,
+                               safeTargetSize,
+                               parameters.heavyGpuPassCount,
+                               error)) {
+            return false;
+        }
+    }
+
     return m_gl->glGetError() == GL_NO_ERROR;
 }
 
 bool ImageProcessingPipeline::ensureProgram(QString *error)
 {
-    if (m_program != nullptr) {
-        return true;
+    if (m_program == nullptr) {
+        m_program = new QOpenGLShaderProgram();
+        if (!m_program->addShaderFromSourceCode(QOpenGLShader::Vertex,
+                "attribute vec2 a_position;\n"
+                "attribute vec2 a_texCoord;\n"
+                "varying vec2 v_texCoord;\n"
+                "void main()\n"
+                "{\n"
+                "    gl_Position = vec4(a_position, 0.0, 1.0);\n"
+                "    v_texCoord = a_texCoord;\n"
+                "}\n")) {
+            if (error) {
+                *error = QStringLiteral("Image vertex shader compile failed: %1").arg(m_program->log());
+            }
+            return false;
+        }
+
+        if (!m_program->addShaderFromSourceCode(QOpenGLShader::Fragment,
+                "#ifdef GL_ES\n"
+                "precision mediump float;\n"
+                "#endif\n"
+                "uniform sampler2D u_texture;\n"
+                "uniform float u_brightness;\n"
+                "uniform float u_contrast;\n"
+                "uniform float u_stressPreview;\n"
+                "uniform vec2 u_invTargetSize;\n"
+                "varying vec2 v_texCoord;\n"
+                "void main()\n"
+                "{\n"
+                "    vec4 color = texture2D(u_texture, v_texCoord);\n"
+                "    float preview = clamp(u_stressPreview, 0.0, 1.0);\n"
+                "    if (preview > 0.0) {\n"
+                "        vec2 texel = u_invTargetSize * (1.2 + 3.8 * preview);\n"
+                "        vec3 s00 = texture2D(u_texture, v_texCoord + vec2(-texel.x, -texel.y)).rgb;\n"
+                "        vec3 s10 = texture2D(u_texture, v_texCoord + vec2( 0.0,     -texel.y)).rgb;\n"
+                "        vec3 s20 = texture2D(u_texture, v_texCoord + vec2( texel.x, -texel.y)).rgb;\n"
+                "        vec3 s01 = texture2D(u_texture, v_texCoord + vec2(-texel.x,  0.0)).rgb;\n"
+                "        vec3 s21 = texture2D(u_texture, v_texCoord + vec2( texel.x,  0.0)).rgb;\n"
+                "        vec3 s02 = texture2D(u_texture, v_texCoord + vec2(-texel.x,  texel.y)).rgb;\n"
+                "        vec3 s12 = texture2D(u_texture, v_texCoord + vec2( 0.0,      texel.y)).rgb;\n"
+                "        vec3 s22 = texture2D(u_texture, v_texCoord + vec2( texel.x,  texel.y)).rgb;\n"
+                "        vec3 grad = (s22 + s21 * 0.7 + s12 * 0.7) - (s00 + s01 * 0.7 + s10 * 0.7);\n"
+                "        float emboss = clamp(dot(grad, vec3(0.3333)) * 1.9 + 0.5, 0.0, 1.0);\n"
+                "        vec3 embossColor = vec3(emboss);\n"
+                "        vec3 shiftedR = texture2D(u_texture, v_texCoord + vec2(texel.x * (1.5 + preview * 2.0), 0.0)).rgb;\n"
+                "        vec3 shiftedB = texture2D(u_texture, v_texCoord - vec2(texel.x * (1.5 + preview * 2.0), texel.y * 0.5)).rgb;\n"
+                "        vec3 dispersion = vec3(shiftedR.r, color.g * (1.0 - 0.15 * preview), shiftedB.b);\n"
+                "        float detailMask = clamp(length(grad) * 1.6, 0.0, 1.0);\n"
+                "        vec3 stylized = mix(embossColor, dispersion, 0.45 + 0.25 * preview);\n"
+                "        vec3 boosted = mix(color.rgb, stylized, min(0.92, 0.40 + 0.45 * preview));\n"
+                "        color.rgb = mix(color.rgb, boosted, max(0.35, detailMask));\n"
+                "    }\n"
+                "    color.rgb = (color.rgb - vec3(0.5)) * u_contrast + vec3(0.5 + u_brightness);\n"
+                "    color.rgb = clamp(color.rgb, 0.0, 1.0);\n"
+                "    gl_FragColor = color;\n"
+                "}\n")) {
+            if (error) {
+                *error = QStringLiteral("Image fragment shader compile failed: %1").arg(m_program->log());
+            }
+            return false;
+        }
+
+        if (!m_program->link()) {
+            if (error) {
+                *error = QStringLiteral("Image shader link failed: %1").arg(m_program->log());
+            }
+            return false;
+        }
     }
 
-    m_program = new QOpenGLShaderProgram();
-    if (!m_program->addShaderFromSourceCode(QOpenGLShader::Vertex,
-            "attribute vec2 a_position;\n"
-            "attribute vec2 a_texCoord;\n"
-            "varying vec2 v_texCoord;\n"
-            "void main()\n"
-            "{\n"
-            "    gl_Position = vec4(a_position, 0.0, 1.0);\n"
-            "    v_texCoord = a_texCoord;\n"
-            "}\n")) {
-        if (error) {
-            *error = QStringLiteral("Image vertex shader compile failed: %1").arg(m_program->log());
+    if (m_heavyProgram == nullptr) {
+        m_heavyProgram = new QOpenGLShaderProgram();
+        if (!m_heavyProgram->addShaderFromSourceCode(QOpenGLShader::Vertex,
+                "attribute vec2 a_position;\n"
+                "attribute vec2 a_texCoord;\n"
+                "varying vec2 v_texCoord;\n"
+                "void main()\n"
+                "{\n"
+                "    gl_Position = vec4(a_position, 0.0, 1.0);\n"
+                "    v_texCoord = a_texCoord;\n"
+                "}\n")) {
+            if (error) {
+                *error = QStringLiteral("Heavy pass vertex shader compile failed: %1").arg(m_heavyProgram->log());
+            }
+            return false;
         }
-        return false;
-    }
 
-    if (!m_program->addShaderFromSourceCode(QOpenGLShader::Fragment,
-            "#ifdef GL_ES\n"
-            "precision mediump float;\n"
-            "#endif\n"
-            "uniform sampler2D u_texture;\n"
-            "uniform float u_brightness;\n"
-            "uniform float u_contrast;\n"
-            "varying vec2 v_texCoord;\n"
-            "void main()\n"
-            "{\n"
-            "    vec4 color = texture2D(u_texture, v_texCoord);\n"
-            "    color.rgb = (color.rgb - vec3(0.5)) * u_contrast + vec3(0.5 + u_brightness);\n"
-            "    color.rgb = clamp(color.rgb, 0.0, 1.0);\n"
-            "    gl_FragColor = color;\n"
-            "}\n")) {
-        if (error) {
-            *error = QStringLiteral("Image fragment shader compile failed: %1").arg(m_program->log());
+        if (!m_heavyProgram->addShaderFromSourceCode(QOpenGLShader::Fragment,
+                "#ifdef GL_ES\n"
+                "precision mediump float;\n"
+                "#endif\n"
+                "uniform sampler2D u_texture;\n"
+                "uniform float u_phase;\n"
+                "varying vec2 v_texCoord;\n"
+                "void main()\n"
+                "{\n"
+                "    vec2 uv = v_texCoord;\n"
+                "    vec4 accum = vec4(0.0);\n"
+                "    float offset = 0.0012 + u_phase * 0.000015;\n"
+                "    for (int ring = 1; ring <= 4; ++ring) {\n"
+                "        float radius = offset * float(ring);\n"
+                "        accum += texture2D(u_texture, uv + vec2(-radius, -radius));\n"
+                "        accum += texture2D(u_texture, uv + vec2( 0.0,   -radius));\n"
+                "        accum += texture2D(u_texture, uv + vec2( radius, -radius));\n"
+                "        accum += texture2D(u_texture, uv + vec2(-radius,  0.0));\n"
+                "        accum += texture2D(u_texture, uv + vec2( radius,  0.0));\n"
+                "        accum += texture2D(u_texture, uv + vec2(-radius,  radius));\n"
+                "        accum += texture2D(u_texture, uv + vec2( 0.0,    radius));\n"
+                "        accum += texture2D(u_texture, uv + vec2( radius,  radius));\n"
+                "    }\n"
+                "    accum += texture2D(u_texture, uv);\n"
+                "    vec4 color = accum / 33.0;\n"
+                "    float wobble = 0.975 + 0.025 * sin(u_phase * 0.17);\n"
+                "    gl_FragColor = vec4(color.rgb * wobble, color.a);\n"
+                "}\n")) {
+            if (error) {
+                *error = QStringLiteral("Heavy pass fragment shader compile failed: %1").arg(m_heavyProgram->log());
+            }
+            return false;
         }
-        return false;
-    }
 
-    if (!m_program->link()) {
-        if (error) {
-            *error = QStringLiteral("Image shader link failed: %1").arg(m_program->log());
+        if (!m_heavyProgram->link()) {
+            if (error) {
+                *error = QStringLiteral("Heavy pass shader link failed: %1").arg(m_heavyProgram->log());
+            }
+            return false;
         }
-        return false;
     }
 
     return true;
@@ -294,6 +397,56 @@ bool ImageProcessingPipeline::ensureFramebuffer(QString *error)
         return false;
     }
 
+    return true;
+}
+
+bool ImageProcessingPipeline::ensureHeavyPassResources(const QSize &targetSize, QString *error)
+{
+    const QSize safeTargetSize = sanitizedSize(targetSize);
+    if (m_heavyTextures[0] == 0U || m_heavyTextures[1] == 0U) {
+        m_gl->glGenTextures(2, m_heavyTextures);
+        if (m_heavyTextures[0] == 0U || m_heavyTextures[1] == 0U) {
+            if (error) {
+                *error = QStringLiteral("Failed to allocate heavy GPU pass textures.");
+            }
+            return false;
+        }
+        m_heavyTextureSize = QSize();
+    }
+
+    if (m_heavyTextureSize == safeTargetSize) {
+        return true;
+    }
+
+    for (GLuint &texture : m_heavyTextures) {
+        m_gl->glBindTexture(GL_TEXTURE_2D, texture);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        m_gl->glTexImage2D(GL_TEXTURE_2D,
+                           0,
+                           GL_RGBA,
+                           safeTargetSize.width(),
+                           safeTargetSize.height(),
+                           0,
+                           GL_RGBA,
+                           GL_UNSIGNED_BYTE,
+                           nullptr);
+    }
+    m_gl->glBindTexture(GL_TEXTURE_2D, 0);
+
+    const GLenum glError = m_gl->glGetError();
+    if (glError != GL_NO_ERROR) {
+        if (error) {
+            *error = QStringLiteral("Heavy GPU pass texture allocation failed with GL error 0x%1")
+                         .arg(static_cast<unsigned int>(glError), 0, 16);
+        }
+        return false;
+    }
+
+    m_heavyTextureSize = safeTargetSize;
     return true;
 }
 
@@ -357,6 +510,88 @@ bool ImageProcessingPipeline::uploadCurrentImage(QOpenGLContext *context, QStrin
     m_uploadedImageSize = m_currentImage.size();
     m_sourceDirty = false;
     return true;
+}
+
+bool ImageProcessingPipeline::runHeavyGpuPasses(GLuint sourceTexture,
+                                                const QSize &targetSize,
+                                                int passCount,
+                                                QString *error)
+{
+    if (passCount <= 0) {
+        Q_UNUSED(sourceTexture)
+        Q_UNUSED(targetSize)
+        return true;
+    }
+
+    if (!ensureHeavyPassResources(targetSize, error)) {
+        return false;
+    }
+
+    const QSize safeTargetSize = sanitizedSize(targetSize);
+    const int positionLocation = m_heavyProgram->attributeLocation("a_position");
+    const int texCoordLocation = m_heavyProgram->attributeLocation("a_texCoord");
+    const int samplerLocation = m_heavyProgram->uniformLocation("u_texture");
+    const int phaseLocation = m_heavyProgram->uniformLocation("u_phase");
+
+    const auto drawPass = [this,
+                           safeTargetSize,
+                           positionLocation,
+                           texCoordLocation,
+                           samplerLocation,
+                           phaseLocation,
+                           error](GLuint readTexture, GLuint writeTexture, float phase) -> bool {
+        m_gl->glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
+        m_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, writeTexture, 0);
+
+        const GLenum fboStatus = m_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (fboStatus != GL_FRAMEBUFFER_COMPLETE) {
+            m_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (error) {
+                *error = QStringLiteral("Heavy GPU pass framebuffer is incomplete: 0x%1")
+                             .arg(static_cast<unsigned int>(fboStatus), 0, 16);
+            }
+            return false;
+        }
+
+        m_gl->glViewport(0, 0, safeTargetSize.width(), safeTargetSize.height());
+        m_gl->glDisable(GL_DEPTH_TEST);
+        m_gl->glDisable(GL_BLEND);
+
+        m_heavyProgram->bind();
+        m_gl->glActiveTexture(GL_TEXTURE0);
+        m_gl->glBindTexture(GL_TEXTURE_2D, readTexture);
+        m_gl->glUniform1i(samplerLocation, 0);
+        m_gl->glUniform1f(phaseLocation, phase);
+
+        m_gl->glBindBuffer(GL_ARRAY_BUFFER, m_vertexBuffer);
+        m_heavyProgram->enableAttributeArray(positionLocation);
+        m_heavyProgram->enableAttributeArray(texCoordLocation);
+        m_heavyProgram->setAttributeBuffer(positionLocation, GL_FLOAT, offsetof(Vertex, x), 2, sizeof(Vertex));
+        m_heavyProgram->setAttributeBuffer(texCoordLocation, GL_FLOAT, offsetof(Vertex, u), 2, sizeof(Vertex));
+        m_gl->glDrawArrays(GL_TRIANGLES, 0, kVertexCount);
+        m_heavyProgram->disableAttributeArray(positionLocation);
+        m_heavyProgram->disableAttributeArray(texCoordLocation);
+        m_gl->glBindBuffer(GL_ARRAY_BUFFER, 0);
+        m_gl->glBindTexture(GL_TEXTURE_2D, 0);
+        m_heavyProgram->release();
+        m_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return true;
+    };
+
+    GLuint readTexture = sourceTexture;
+    for (int passIndex = 0; passIndex < passCount; ++passIndex) {
+        GLuint writeTexture = m_heavyTextures[passIndex % 2];
+        if (writeTexture == readTexture) {
+            writeTexture = m_heavyTextures[(passIndex + 1) % 2];
+        }
+        if (!drawPass(readTexture, writeTexture, float(passIndex))) {
+            return false;
+        }
+
+        readTexture = writeTexture;
+    }
+
+    return m_gl->glGetError() == GL_NO_ERROR;
 }
 
 void ImageProcessingPipeline::updateGeometry(const ImageEffectParameters &parameters,

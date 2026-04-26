@@ -10,6 +10,7 @@ struct ImageEffectParameters
     float panX = 0.0f;
     float panY = 0.0f;
     float rotationDegrees = 0.0f;
+    int heavyGpuPassCount = 0;
     bool flipHorizontal = false;
     bool flipVertical = false;
 };

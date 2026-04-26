@@ -20,6 +20,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStatusBar>
+#include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QtMath>
@@ -64,6 +65,9 @@ MainWindow::MainWindow(QWidget *parent)
             Qt::QueuedConnection);
     connect(m_worker, &SharedTextureWorker::imageSelectionChanged,
             this, &MainWindow::onImageSelectionChanged,
+            Qt::QueuedConnection);
+    connect(m_worker, &SharedTextureWorker::renderTimingUpdated,
+            this, &MainWindow::onRenderTimingUpdated,
             Qt::QueuedConnection);
 
     m_workerThread.start();
@@ -179,6 +183,7 @@ void MainWindow::onImageEffectControlChanged()
     m_effectParameters.panX = float(m_panXSlider->value()) / 100.0f;
     m_effectParameters.panY = float(m_panYSlider->value()) / 100.0f;
     m_effectParameters.rotationDegrees = float(m_rotationSlider->value());
+    m_effectParameters.heavyGpuPassCount = m_heavyGpuSlider->value();
     setImageEffectControlsFromState();
     pushEffectParameters();
     requestRender();
@@ -241,6 +246,12 @@ void MainWindow::onWorkerStatus(const QString &message)
     }
 }
 
+void MainWindow::onRenderTimingUpdated(double elapsedMs)
+{
+    m_lastRenderElapsedMs = elapsedMs;
+    updateStatusBarMessage();
+}
+
 void MainWindow::setupActions()
 {
     QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("File"));
@@ -287,10 +298,11 @@ void MainWindow::setupImageEffectControls()
 
     m_brightnessSlider = addSlider(QStringLiteral("Brightness"), -100, 100, 0, &m_brightnessValueLabel);
     m_contrastSlider = addSlider(QStringLiteral("Contrast"), 0, 200, 100, &m_contrastValueLabel);
-    m_zoomSlider = addSlider(QStringLiteral("Zoom"), 10, 300, 100, &m_zoomValueLabel);
+    m_zoomSlider = addSlider(QStringLiteral("Zoom"), 10, 900, 100, &m_zoomValueLabel);
     m_panXSlider = addSlider(QStringLiteral("Pan X"), -100, 100, 0, &m_panXValueLabel);
     m_panYSlider = addSlider(QStringLiteral("Pan Y"), -100, 100, 0, &m_panYValueLabel);
     m_rotationSlider = addSlider(QStringLiteral("Rotation"), -180, 180, 0, &m_rotationValueLabel);
+    m_heavyGpuSlider = addSlider(QStringLiteral("GPU Stress Passes"), 0, 256, 0, &m_heavyGpuValueLabel);
 
     QLabel *flipLabel = new QLabel(QStringLiteral("Flip"), panel);
     QHBoxLayout *flipLayout = new QHBoxLayout();
@@ -303,6 +315,8 @@ void MainWindow::setupImageEffectControls()
 
     layout->addWidget(flipLabel);
     layout->addLayout(flipLayout);
+    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Passes runs extra worker-side offscreen GL passes for stress testing."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("The displayed image also shifts toward an embossed / local chromatic-dispersion look as stress increases."), panel));
     layout->addWidget(new QLabel(QStringLiteral("All image effects run in the worker GL context."), panel));
     layout->addStretch(1);
 
@@ -312,6 +326,7 @@ void MainWindow::setupImageEffectControls()
     connect(m_panXSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
     connect(m_panYSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
     connect(m_rotationSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
+    connect(m_heavyGpuSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
     connect(m_flipHorizontalButton, &QPushButton::toggled, this, [this](bool checked) {
         m_effectParameters.flipHorizontal = checked;
         setImageEffectControlsFromState();
@@ -338,6 +353,7 @@ void MainWindow::setImageEffectControlsFromState()
     const QSignalBlocker panXBlocker(m_panXSlider);
     const QSignalBlocker panYBlocker(m_panYSlider);
     const QSignalBlocker rotationBlocker(m_rotationSlider);
+    const QSignalBlocker heavyGpuBlocker(m_heavyGpuSlider);
     const QSignalBlocker flipHorizontalBlocker(m_flipHorizontalButton);
     const QSignalBlocker flipVerticalBlocker(m_flipVerticalButton);
 
@@ -347,6 +363,7 @@ void MainWindow::setImageEffectControlsFromState()
     m_panXSlider->setValue(int(qRound(m_effectParameters.panX * 100.0f)));
     m_panYSlider->setValue(int(qRound(m_effectParameters.panY * 100.0f)));
     m_rotationSlider->setValue(int(qRound(m_effectParameters.rotationDegrees)));
+    m_heavyGpuSlider->setValue(m_effectParameters.heavyGpuPassCount);
     m_flipHorizontalButton->setChecked(m_effectParameters.flipHorizontal);
     m_flipVerticalButton->setChecked(m_effectParameters.flipVertical);
     m_flipHorizontalButton->setText(m_effectParameters.flipHorizontal ? QStringLiteral("Flip H On") : QStringLiteral("Flip H"));
@@ -358,6 +375,7 @@ void MainWindow::setImageEffectControlsFromState()
     m_panXValueLabel->setText(QString::number(m_effectParameters.panX, 'f', 2));
     m_panYValueLabel->setText(QString::number(m_effectParameters.panY, 'f', 2));
     m_rotationValueLabel->setText(QStringLiteral("%1 deg").arg(int(qRound(m_effectParameters.rotationDegrees))));
+    m_heavyGpuValueLabel->setText(QStringLiteral("%1 passes").arg(m_effectParameters.heavyGpuPassCount));
 }
 
 void MainWindow::updateImageActions()
@@ -391,12 +409,14 @@ void MainWindow::updateStatusBarMessage(const QString &message)
         return;
     }
 
-    statusBar()->showMessage(QStringLiteral("%1 / %2  %3  Output:%4x%5")
+    statusBar()->showMessage(QStringLiteral("%1 / %2  %3  Output:%4x%5  Worker:%6 ms  Stress:%7")
         .arg(m_currentImageIndex + 1)
         .arg(m_imageCount)
         .arg(m_currentImageName)
         .arg(m_displayWidget->outputPixelSize().width())
-        .arg(m_displayWidget->outputPixelSize().height()));
+        .arg(m_displayWidget->outputPixelSize().height())
+        .arg(QString::number(m_lastRenderElapsedMs, 'f', 1))
+        .arg(m_effectParameters.heavyGpuPassCount));
 }
 
 void MainWindow::pushEffectParameters()

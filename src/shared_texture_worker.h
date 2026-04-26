@@ -27,6 +27,7 @@ signals:
     void textureReady(int slotIndex, quint32 textureId, QSize size, quint64 frameIndex);
     void initializationFailed(const QString &reason);
     void statusMessage(const QString &message);
+    void renderTimingUpdated(double elapsedMs);
     void imageDirectoryLoadFinished(
         bool loaded,
         const QString &errorMessage,

@@ -39,6 +39,7 @@ private slots:
     void onImageSelectionChanged(int currentIndex, int count, const QString &displayName);
     void onWorkerError(const QString &reason);
     void onWorkerStatus(const QString &message);
+    void onRenderTimingUpdated(double elapsedMs);
 
 private:
     void setupActions();
@@ -64,12 +65,14 @@ private:
     QLabel *m_panXValueLabel = nullptr;
     QLabel *m_panYValueLabel = nullptr;
     QLabel *m_rotationValueLabel = nullptr;
+    QLabel *m_heavyGpuValueLabel = nullptr;
     QSlider *m_brightnessSlider = nullptr;
     QSlider *m_contrastSlider = nullptr;
     QSlider *m_zoomSlider = nullptr;
     QSlider *m_panXSlider = nullptr;
     QSlider *m_panYSlider = nullptr;
     QSlider *m_rotationSlider = nullptr;
+    QSlider *m_heavyGpuSlider = nullptr;
     QPushButton *m_flipHorizontalButton = nullptr;
     QPushButton *m_flipVerticalButton = nullptr;
 
@@ -79,4 +82,5 @@ private:
     int m_currentImageIndex = -1;
     int m_imageCount = 0;
     QString m_currentImageName;
+    double m_lastRenderElapsedMs = 0.0;
 };

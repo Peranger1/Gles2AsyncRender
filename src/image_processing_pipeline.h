@@ -43,9 +43,14 @@ private:
     };
 
     bool ensureProgram(QString *error);
+    bool ensureHeavyPassResources(const QSize &targetSize, QString *error);
     bool ensureFramebuffer(QString *error);
     bool ensureSourceTexture(QOpenGLContext *context, QString *error);
     bool uploadCurrentImage(QOpenGLContext *context, QString *error);
+    bool runHeavyGpuPasses(GLuint sourceTexture,
+                           const QSize &targetSize,
+                           int passCount,
+                           QString *error);
     void updateGeometry(const ImageEffectParameters &parameters,
                         const QSize &contentSize,
                         const QSize &targetSize);
@@ -54,9 +59,12 @@ private:
 
     QOpenGLFunctions *m_gl = nullptr;
     QOpenGLShaderProgram *m_program = nullptr;
+    QOpenGLShaderProgram *m_heavyProgram = nullptr;
     GLuint m_framebuffer = 0U;
     GLuint m_sourceTexture = 0U;
     GLuint m_vertexBuffer = 0U;
+    GLuint m_heavyTextures[2] = {0U, 0U};
+    QSize m_heavyTextureSize;
     QStringList m_imagePaths;
     int m_currentIndex = -1;
     QImage m_currentImage;
