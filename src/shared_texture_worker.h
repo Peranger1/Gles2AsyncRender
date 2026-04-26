@@ -6,8 +6,11 @@
 #include <QSurfaceFormat>
 #include <QThread>
 
+#include <memory>
+
 class QOffscreenSurface;
 class QOpenGLContext;
+class SharedTextureFramePool;
 
 class SharedTextureWorker final : public QThread
 {
@@ -16,6 +19,7 @@ class SharedTextureWorker final : public QThread
 public:
     SharedTextureWorker(QOpenGLContext *shareContext,
                         QOffscreenSurface *surface,
+                        std::shared_ptr<SharedTextureFramePool> framePool,
                         const QSurfaceFormat &format,
                         QObject *parent = nullptr);
     ~SharedTextureWorker() override;
@@ -24,7 +28,7 @@ public:
     void stop();
 
 signals:
-    void textureReady(quint32 textureId, QSize size, quint64 frameIndex);
+    void textureReady(int slotIndex, quint32 textureId, QSize size, quint64 frameIndex);
     void initializationFailed(const QString &reason);
     void statusMessage(const QString &message);
 
@@ -33,9 +37,12 @@ protected:
 
 private:
     QSize currentOutputSize() const;
+    bool makeWorkerContextCurrent(QOpenGLContext *context, const char *phase, QString *error);
+    QString describeContextState(const QOpenGLContext *context) const;
 
     QPointer<QOpenGLContext> m_shareContext;
     QPointer<QOffscreenSurface> m_surface;
+    std::shared_ptr<SharedTextureFramePool> m_framePool;
     QSurfaceFormat m_format;
 
     mutable QMutex m_sizeMutex;

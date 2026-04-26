@@ -1,5 +1,6 @@
 .qtcreator/
 build/
+.firecrawl/
 
 # Qt Creator user files
 *.pro.user

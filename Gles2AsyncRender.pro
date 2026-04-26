@@ -19,4 +19,5 @@ HEADERS += \
     src/angle_threading.h \
     src/async_gles_widget.h \
     src/gles_thread_guard.h \
+    src/shared_texture_frame_pool.h \
     src/shared_texture_worker.h

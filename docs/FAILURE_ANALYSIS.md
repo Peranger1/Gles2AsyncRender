@@ -20,7 +20,7 @@
 
 ## 当前状态
 
-截至大约 `2026-04-24 01:16` 的验证结果，当前样例已经可以：
+截至大约 `2026-04-24 01:16` 的验证结果，样例已经可以：
 
 - 正常启动
 - 正常渲染
@@ -33,7 +33,23 @@
 - `ID3D11Multithread` 保护已经成功启用
 - 之前出现的 `D3D11 CORRUPTION` 崩溃在本次验证运行中已消失
 
-因此，当前项目已经不再处于“原因不明的 ANGLE 不稳定”阶段，主要阻塞项已经被定位并验证了可行修复路径。
+到了 `2026-04-26`，又继续暴露出两类更细的后续问题：
+
+- 启动阶段偶发的 worker `makeCurrent()` 失败，日志表现为 `eglError: 3006`
+- resize 相关的显示伪影，从“瞬间透明”进一步演化到“缩放期间持续透明”
+
+这两类问题已经不再属于最初的 ANGLE/D3D11 多线程损坏，而是：
+
+- 启动时序与 `QOpenGLWidget` 内部初始化阶段的竞态
+- 共享纹理提交协议和 resize 期间纹理存储管理的问题
+
+目前代码已经为这两类问题引入了新的收敛路径：
+
+- worker 启动延后到首帧 `frameSwapped()` 之后
+- 显示侧改为 `front / pending / retiring / free` 槽位协议
+- worker 侧改为只对当前 render slot 做纹理重分配，避免 resize 时破坏正在显示的 front texture
+
+最新代码已在 `2026-04-26` 使用 `vcvars64.bat + qmake + nmake` 编译通过。最终的 live-resize 观感仍应以最新运行验证结果为准。
 
 ## 当前结论
 
@@ -43,6 +59,11 @@
 - 共享纹理设计不是崩溃根因
 - 真正决定性的根因是 ANGLE 补丁路径中曾经把 Qt 持有的 EGL 句柄和另一份模块实例中的 EGL 入口混用了
 - 当 EGL 函数改为从 Qt 实际加载的 ANGLE 模块中解析，并启用 `ID3D11Multithread` 之后，样例在验证运行中变得稳定
+
+此外，后续又确认了两点：
+
+- 启动阶段的 `eglError: 3006` 不是新的 ANGLE/D3D11 底层损坏，而是 worker 共享上下文在 `QOpenGLWidget` 首帧初始化尚未完全稳定时过早 `makeCurrent()`
+- resize 期间的透明伪影不是共享上下文本身失效，而是显示协议和纹理重分配策略还不够严格
 
 ## 故障时间线
 
@@ -232,6 +253,106 @@
 - resize 不再黑屏
 - worker 线程共享上下文的总体设计得以保留
 
+### 7. 新出现的启动失败：worker `makeCurrent()` 返回 `eglError: 3006`
+
+后续运行中观察到的新日志：
+
+- `QWindowsEGLContext::makeCurrent: Failed to make surface current. eglError: 3006`
+- `Shared texture worker error: "Failed to make worker context current."`
+
+这次故障与之前的 `D3D11 CORRUPTION` 不同，特点是：
+
+- worker 上下文已经创建成功
+- ANGLE threading patch 也已经生效
+- 但 worker 第一次在离屏 surface 上 `makeCurrent()` 时，底层返回 `EGL_BAD_CONTEXT (0x3006)`
+
+根因分析：
+
+- 这更像是启动时序问题，而不是底层 D3D11 immediate context 再次并发损坏
+- worker 线程原先是在 `initializeGL()` 里立即启动
+- 此时 `QOpenGLWidget` 自己的首帧初始化、内部 FBO 和离屏 surface 状态还处于过渡阶段
+- 过早让 worker 抢占共享上下文路径，会让 ANGLE/Qt 的离屏 `makeCurrent()` 组合变得不稳定
+
+采取的修改：
+
+- 不再在 `initializeGL()` 中立刻启动 worker
+- 改为等首帧 `frameSwapped()` 之后再启动 worker
+- 同时在 worker 的 `makeCurrent()` 路径中加入有限重试和更详细的上下文 / offscreen surface 状态日志
+
+结果：
+
+- 启动路径重新恢复稳定
+- 这一步把问题从“后端线程损坏”切换为“首帧初始化时序竞态”并成功规避
+
+### 8. 启动稳定后，resize 出现“瞬间透明”
+
+在后续验证中，窗口缩放不再崩溃，但显示路径又暴露出新的现象：
+
+- 不是黑屏
+- 也不是立即崩溃
+- 而是在 resize 期间出现“瞬间透明”
+
+根因分析：
+
+- `QOpenGLWidget` 在 resize 时会重建内部 FBO，并清掉旧尺寸内容
+- 当前 widget 侧使用 `NoPartialUpdate`
+- worker 仍以异步节流方式生成新尺寸纹理
+- 因此 resize 过程中会存在一个短暂空窗：
+  - widget 已经切到新尺寸 FBO
+  - worker 还没有提交第一张新尺寸的可显示纹理
+- 在这个空窗里，顶层窗口合成时会短暂暴露出父窗口/背景，看起来就像 widget 区域透明了一下
+
+采取的修改方向：
+
+- 不再采用“谁最新就直接显示谁”的弱约束纹理切换
+- 开始收敛到显式的 front/back 提交协议
+
+### 9. 第一次 front/back 收敛后，现象从“瞬间透明”变成“缩放期间持续透明”
+
+第一次引入 front/back 提交协议后，观察到新的表现：
+
+- resize 时不再只是瞬间透明
+- 而是在整个 live resize 期间持续透明
+- 停止缩放后才重新显示
+
+这个阶段非常关键，因为它说明：
+
+- front/back 提交协议的总体方向是对的
+- 但纹理生命周期管理仍然有漏洞
+
+第一次 front/back 方案的设计要点是：
+
+- worker 使用多槽位共享纹理池
+- UI 只显示当前 `front`
+- worker 只把新帧提交成 `pending`
+- UI 在 `paintGL()` 中把 `pending` 升格为新的 `front`
+- 旧 `front` 等到 `frameSwapped()` 后再回收
+
+第一次实现后的根因分析：
+
+- 虽然 worker 不再直接渲染到当前 `front` 对应的槽位
+- 但 resize 时 worker 仍然会对所有槽位统一执行 `glTexImage2D()`
+- 这会把当前正在显示的 `front texture` 的底层存储也一起重分配
+- 于是：
+  - UI 逻辑上还在“继续显示旧 front”
+  - 但这个旧 front 的实际纹理存储已经被重置
+- 最终表现就是：整个 live resize 期间都没有可稳定显示的 front 内容
+
+采取的修正：
+
+- 保留 `front / pending / retiring / free` 提交协议
+- 但把纹理分配策略改为：
+  - 只对当前 render slot 单独重分配
+  - 不再在 resize 时批量重分配所有共享纹理
+- 这样当前正在显示的 `front` 纹理在新尺寸帧真正提交前不会被改写
+
+结果：
+
+- 显示协议从“弱约束的直接切换”升级为“显式提交 + 延迟回收”
+- 纹理存储从“全槽位统一 resize”收紧为“按 render slot 单独 resize”
+- 这一步是解决 live resize 透明伪影的关键结构修正
+- 最新代码已编译通过，运行时最终效果仍以用户最新验证为准
+
 ## 为什么当前互斥锁仍然不是万能解
 
 当前互斥锁只能保护应用显式执行的 GL 代码区段，它无法完全控制：
@@ -248,13 +369,20 @@
 
 - `src/async_gles_widget.cpp`
   - 持有显示侧 `QOpenGLWidget`
-  - 只消费并显示最新的共享纹理 id
+  - 持有显示侧 front/pending 状态
+  - 只在安全时机切换新的 front texture
+  - 旧 front 会在 `frameSwapped()` 后再回收
 
 - `src/shared_texture_worker.cpp`
   - 持有 worker 线程
   - 创建共享 GLES2 上下文
   - 在 worker 上下文内运行演示 GPU 后端
-  - 把纹理 id 回传给 widget
+  - 只对当前 render slot 渲染
+  - 把新帧先提交为 pending，再交给 widget 提升为 front
+
+- `src/shared_texture_frame_pool.h`
+  - 定义共享纹理槽位池
+  - 显式管理 `free / rendering / pending / front / retiring` 状态
 
 - `src/angle_threading.cpp`
   - 探测 Qt 暴露的 EGL native handle
@@ -268,14 +396,18 @@
 当前问题实际上分成两类，不应混为一谈：
 
 1. 应用层资源与生命周期问题
-   - 例如 resize 黑屏、纹理分配路径问题
+   - 例如 resize 黑屏、启动阶段 `eglError: 3006`、front texture 被错误重分配
    - 这些问题可以在样例代码内部修复
 
 2. 后端结构性线程冲突
    - 例如 `ClearRenderTargetView` / `GetData` 上的 `D3D11 CORRUPTION`
    - 这是 Qt 5.15.2 + ANGLE + `QOpenGLWidget` + worker 线程 GLES 的特定组合问题
 
-在当前样例里，第 2 类问题已经不再是主要未解阻塞项，因为关键根因已经找到并处理。
+3. 显示提交协议问题
+   - 例如 resize 瞬间透明、live resize 持续透明
+   - 这类问题不再是“能不能共享上下文”的问题，而是“前台显示纹理何时切换、何时回收、哪些槽位允许 resize”
+
+在当前样例里，第 2 类问题已经不再是主要未解阻塞项；后续工作重点逐步转向第 1 类和第 3 类问题的工程化收敛。
 
 ## 后续修改策略
 
@@ -328,6 +460,25 @@
 1. 仍然保留 worker 线程 GPU 库设计，但 Windows 下改走 Desktop OpenGL，而不是 `AA_UseOpenGLES`
 2. 继续保留 `AA_UseOpenGLES`，但重设算法库边界，不再让真实 GPU 工作发生在 worker 持有的 GL 上下文中
 
+### 策略 D：显示路径采用显式提交协议，而不是“最新帧直接覆盖显示帧”
+
+这条策略是在解决 resize 透明伪影时新增的。
+
+当前结论是：
+
+- 如果 worker 可以直接改写 UI 正在显示的纹理
+- 或 resize 时会批量重分配所有共享纹理
+
+那么即使上下文共享和 ANGLE 线程保护都没有问题，live resize 期间仍然会出现显示伪影。
+
+因此显示路径必须收敛到下面的规则：
+
+- worker 只能渲染到当前拿到的 render slot
+- 新帧只能先提交成 `pending`
+- UI 只能在自己的显示时机把 `pending` 升格为新的 `front`
+- 旧 `front` 只能在一次真正的 `frameSwapped()` 之后回收
+- resize 时只能重分配当前 render slot，不能重分配正在显示的 `front`
+
 ## 已记录下来的关键现象
 
 本轮排查已经明确记录过以下关键现象：
@@ -335,12 +486,17 @@
 - 启动时出现 `D3D11 CORRUPTION: ClearRenderTargetView`
 - 后续出现 `D3D11 CORRUPTION: GetData`
 - resize 后黑屏并伴随共享纹理分配失败
+- 后续出现 `QWindowsEGLContext::makeCurrent ... eglError: 3006`
+- worker 报错 `Failed to make worker context current`
+- 启动时序调整后，resize 期间出现“瞬间透明”
+- 第一次 front/back 收敛后，现象变成“缩放期间持续透明，停止后恢复显示”
 - `eglGetCurrentDisplay` 返回 `EGL_NO_DISPLAY`
 - `eglQueryDisplayAttribEXT(EGL_DEVICE_EXT)` 返回 EGL 错误 `0x3008`
 - `nativeResourceForContext("egldisplay")` 虽返回非空指针，但无法被 `eglQueryString` 接受
 - `nativeResourceForIntegration("egldisplay")` 返回空
 - `nativeResourceForWindow("egldisplay")` 被 `QWindowsNativeInterface` 拒绝
 - 在改为从 Qt 已加载的 `libEGLd.dll` 解析 EGL 函数并启用 `ID3D11Multithread` 后，最终验证运行成功
+- 在引入显式 front/pending/retiring 协议并把纹理重分配收紧为“只作用于当前 render slot”后，代码路径已经对准 live resize 伪影的真正根因
 
 这些现象强烈说明：主要矛盾并不是样例里的 shader、FBO 或纹理显示代码，而是这一特定 Qt/Windows/OpenGLES 组合下 ANGLE 后端的线程行为。
 
@@ -393,6 +549,7 @@
 
 - `src/async_gles_widget.cpp`
 - `src/async_gles_widget.h`
+- `src/shared_texture_frame_pool.h`
 - `src/shared_texture_worker.cpp`
 - `src/shared_texture_worker.h`
 - `src/angle_threading.cpp`

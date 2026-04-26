@@ -10,6 +10,8 @@ class QOffscreenSurface;
 class QPaintEvent;
 class QResizeEvent;
 
+struct SharedTextureFrame;
+class SharedTextureFramePool;
 class SharedTextureWorker;
 
 class AsyncGlesWidget final : public QOpenGLWidget, protected QOpenGLFunctions
@@ -28,9 +30,11 @@ protected:
     void paintGL() override;
 
 private slots:
-    void onTextureReady(quint32 textureId, QSize size, quint64 frameIndex);
+    void onTextureReady(int slotIndex, quint32 textureId, QSize size, quint64 frameIndex);
     void onWorkerError(const QString &reason);
     void onWorkerStatus(const QString &message);
+    void startWorkerIfNeeded();
+    void onFrameSwapped();
 
 private:
     QSize outputPixelSize() const;
@@ -47,9 +51,14 @@ private:
     quint32 m_displayTexture = 0U;
     quint64 m_displayFrame = 0U;
     QSize m_displayTextureSize;
+    int m_frontSlot = -1;
+    int m_retiringSlot = -1;
+    SharedTextureFrame *m_pendingFrame = nullptr;
     bool m_acceptFrames = false;
     bool m_compositionLocked = false;
+    bool m_workerStartPending = false;
 
     std::unique_ptr<QOffscreenSurface> m_surface;
+    std::shared_ptr<SharedTextureFramePool> m_framePool;
     std::unique_ptr<SharedTextureWorker> m_worker;
 };

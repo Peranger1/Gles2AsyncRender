@@ -2,6 +2,7 @@
 
 #include "angle_threading.h"
 #include "gles_thread_guard.h"
+#include "shared_texture_frame_pool.h"
 
 #include <QElapsedTimer>
 #include <QMutexLocker>
@@ -11,6 +12,7 @@
 #include <QOpenGLShaderProgram>
 #include <QThread>
 #include <QDebug>
+#include <QScreen>
 
 #include <array>
 #include <memory>
@@ -18,6 +20,9 @@
 namespace
 {
 constexpr int kTargetFrameMs = 33;
+constexpr int kMakeCurrentRetryCount = 5;
+constexpr unsigned long kMakeCurrentRetryDelayMs = 20;
+constexpr unsigned long kNoFreeSlotSleepMs = 4;
 
 constexpr GLfloat kVertices[] = {
     -1.0f, -1.0f,
@@ -54,20 +59,27 @@ public:
             return false;
         }
 
-        if (!ensureTextures(size, error)) {
+        if (!ensureTextureForSlot(0, size, error)) {
             return false;
         }
 
         return true;
     }
 
-    GLuint processFrame(const QSize &size, quint64 frameIndex, QString *error)
+    GLuint processFrame(int slotIndex, const QSize &size, quint64 frameIndex, QString *error)
     {
-        if (!ensureTextures(size, error)) {
+        if (slotIndex < 0 || slotIndex >= static_cast<int>(m_textures.size())) {
+            if (error) {
+                *error = QStringLiteral("Worker render slot index is out of range.");
+            }
             return 0U;
         }
 
-        const GLuint texture = m_textures[static_cast<std::size_t>(frameIndex % m_textures.size())];
+        if (!ensureTextureForSlot(slotIndex, size, error)) {
+            return 0U;
+        }
+
+        const GLuint texture = m_textures[static_cast<std::size_t>(slotIndex)];
 
         m_gl->glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
         m_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
@@ -107,6 +119,19 @@ public:
         return texture;
     }
 
+    int textureCount() const
+    {
+        return static_cast<int>(m_textures.size());
+    }
+
+    GLuint textureIdForSlot(int slotIndex) const
+    {
+        if (slotIndex < 0 || slotIndex >= static_cast<int>(m_textures.size())) {
+            return 0U;
+        }
+        return m_textures[static_cast<std::size_t>(slotIndex)];
+    }
+
     void shutdown()
     {
         if (!m_gl) {
@@ -120,11 +145,11 @@ public:
 
         if (m_textures[0] != 0U) {
             m_gl->glDeleteTextures(static_cast<GLsizei>(m_textures.size()), m_textures.data());
-            m_textures = {0U, 0U};
+            m_textures = {0U, 0U, 0U};
         }
 
         m_program.removeAllShaders();
-        m_allocatedSize = QSize();
+        m_allocatedSizes = {};
         m_gl = nullptr;
         m_context = nullptr;
     }
@@ -212,9 +237,16 @@ private:
         return true;
     }
 
-    bool ensureTextures(const QSize &size, QString *error)
+    bool ensureTextureForSlot(int slotIndex, const QSize &size, QString *error)
     {
         if (size.isEmpty()) {
+            return false;
+        }
+
+        if (slotIndex < 0 || slotIndex >= static_cast<int>(m_textures.size())) {
+            if (error) {
+                *error = QStringLiteral("Texture slot index is out of range.");
+            }
             return false;
         }
 
@@ -228,27 +260,26 @@ private:
             }
         }
 
-        if (m_allocatedSize == size) {
+        if (m_allocatedSizes[static_cast<std::size_t>(slotIndex)] == size) {
             return true;
         }
 
         m_gl->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        for (GLuint texture : m_textures) {
-            m_gl->glBindTexture(GL_TEXTURE_2D, texture);
-            m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            m_gl->glTexImage2D(GL_TEXTURE_2D,
-                               0,
-                               GL_RGBA,
-                               size.width(),
-                               size.height(),
-                               0,
-                               GL_RGBA,
-                               GL_UNSIGNED_BYTE,
-                               nullptr);
-        }
+        const GLuint texture = m_textures[static_cast<std::size_t>(slotIndex)];
+        m_gl->glBindTexture(GL_TEXTURE_2D, texture);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_gl->glTexImage2D(GL_TEXTURE_2D,
+                           0,
+                           GL_RGBA,
+                           size.width(),
+                           size.height(),
+                           0,
+                           GL_RGBA,
+                           GL_UNSIGNED_BYTE,
+                           nullptr);
         m_gl->glBindTexture(GL_TEXTURE_2D, 0);
 
         const GLenum errorCode = m_gl->glGetError();
@@ -260,7 +291,7 @@ private:
             return false;
         }
 
-        m_allocatedSize = size;
+        m_allocatedSizes[static_cast<std::size_t>(slotIndex)] = size;
         return true;
     }
 
@@ -268,22 +299,38 @@ private:
     QOpenGLFunctions *m_gl = nullptr;
     QOpenGLShaderProgram m_program;
     GLuint m_fbo = 0U;
-    std::array<GLuint, 2> m_textures = {0U, 0U};
-    QSize m_allocatedSize;
+    std::array<GLuint, 3> m_textures = {0U, 0U, 0U};
+    std::array<QSize, 3> m_allocatedSizes;
     int m_positionLocation = -1;
     int m_texCoordLocation = -1;
     int m_timeLocation = -1;
     int m_resolutionLocation = -1;
 };
+
+QString formatToString(const QSurfaceFormat &format)
+{
+    QString text;
+    QDebug debug(&text);
+    debug.nospace() << format;
+    return text;
+}
+
+QString threadIdToString(Qt::HANDLE threadId)
+{
+    return QStringLiteral("0x%1")
+        .arg(quintptr(threadId), QT_POINTER_SIZE * 2, 16, QLatin1Char('0'));
+}
 } // namespace
 
 SharedTextureWorker::SharedTextureWorker(QOpenGLContext *shareContext,
                                          QOffscreenSurface *surface,
+                                         std::shared_ptr<SharedTextureFramePool> framePool,
                                          const QSurfaceFormat &format,
                                          QObject *parent)
     : QThread(parent)
     , m_shareContext(shareContext)
     , m_surface(surface)
+    , m_framePool(std::move(framePool))
     , m_format(format)
 {
 }
@@ -317,6 +364,52 @@ QSize SharedTextureWorker::currentOutputSize() const
     return m_outputSize;
 }
 
+QString SharedTextureWorker::describeContextState(const QOpenGLContext *context) const
+{
+    const QOffscreenSurface *surface = m_surface.data();
+    const QOpenGLContext *shareContext = m_shareContext.data();
+
+    return QStringLiteral("workerThread=%1 contextValid=%2 contextFormat=%3 shareContext=%4 shareScreen=%5 "
+                          "surfaceValid=%6 surfaceScreen=%7 surfaceRequestedFormat=%8 surfaceActualFormat=%9")
+        .arg(threadIdToString(QThread::currentThreadId()),
+             context && context->isValid() ? QStringLiteral("true") : QStringLiteral("false"),
+             context ? formatToString(context->format()) : QStringLiteral("<null>"),
+             shareContext ? QStringLiteral("present") : QStringLiteral("null"),
+             shareContext && shareContext->screen() ? shareContext->screen()->name() : QStringLiteral("<null>"),
+             surface && surface->isValid() ? QStringLiteral("true") : QStringLiteral("false"),
+             surface && surface->screen() ? surface->screen()->name() : QStringLiteral("<null>"),
+             surface ? formatToString(surface->requestedFormat()) : QStringLiteral("<null>"),
+             surface ? formatToString(surface->format()) : QStringLiteral("<null>"));
+}
+
+bool SharedTextureWorker::makeWorkerContextCurrent(QOpenGLContext *context, const char *phase, QString *error)
+{
+    for (int attempt = 1; attempt <= kMakeCurrentRetryCount; ++attempt) {
+        sharedGlesMutex().lock();
+        if (context->makeCurrent(m_surface.data())) {
+            return true;
+        }
+        sharedGlesMutex().unlock();
+
+        qWarning().noquote()
+            << QStringLiteral("Worker makeCurrent failed during %1 (attempt %2/%3). %4")
+                   .arg(QString::fromLatin1(phase))
+                   .arg(attempt)
+                   .arg(kMakeCurrentRetryCount)
+                   .arg(describeContextState(context));
+
+        if (attempt < kMakeCurrentRetryCount) {
+            msleep(kMakeCurrentRetryDelayMs);
+        }
+    }
+
+    if (error) {
+        *error = QStringLiteral("Failed to make worker context current during %1. %2")
+                     .arg(QString::fromLatin1(phase), describeContextState(context));
+    }
+    return false;
+}
+
 void SharedTextureWorker::run()
 {
     if (m_shareContext.isNull()) {
@@ -329,9 +422,17 @@ void SharedTextureWorker::run()
         return;
     }
 
+    if (!m_framePool || m_framePool->slotCount() <= 0) {
+        emit initializationFailed(QStringLiteral("Shared frame pool is not available."));
+        return;
+    }
+
     QOpenGLContext context;
     context.setFormat(m_format);
     context.setShareContext(m_shareContext.data());
+    if (m_shareContext->screen()) {
+        context.setScreen(m_shareContext->screen());
+    }
 
     {
         ScopedGlesLock lock;
@@ -348,24 +449,28 @@ void SharedTextureWorker::run()
     std::unique_ptr<DemoGpuAlgorithmBackend> backend = std::make_unique<DemoGpuAlgorithmBackend>();
     QString error;
 
-    {
-        ScopedGlesLock lock;
-        if (!context.makeCurrent(m_surface.data())) {
-            emit initializationFailed(QStringLiteral("Failed to make worker context current."));
-            return;
-        }
-
-        const AngleThreadingInfo angleInfo = ensureAngleD3D11MultithreadProtection();
-        emit statusMessage(angleInfo.message);
-
-        if (!backend->initialize(&context, currentOutputSize(), &error)) {
-            context.doneCurrent();
-            emit initializationFailed(error);
-            return;
-        }
-
-        context.doneCurrent();
+    if (!makeWorkerContextCurrent(&context, "initialization", &error)) {
+        emit initializationFailed(error);
+        return;
     }
+
+    const AngleThreadingInfo angleInfo = ensureAngleD3D11MultithreadProtection();
+    emit statusMessage(angleInfo.message);
+
+    if (!backend->initialize(&context, currentOutputSize(), &error)) {
+        context.doneCurrent();
+        sharedGlesMutex().unlock();
+        emit initializationFailed(error);
+        return;
+    }
+
+    m_framePool->reset();
+    for (int i = 0; i < backend->textureCount(); ++i) {
+        m_framePool->registerTexture(i, backend->textureIdForSlot(i));
+    }
+
+    context.doneCurrent();
+    sharedGlesMutex().unlock();
 
     quint64 frameIndex = 0;
     QElapsedTimer frameTimer;
@@ -379,31 +484,44 @@ void SharedTextureWorker::run()
             continue;
         }
 
+        int renderSlot = -1;
+        if (!m_framePool->tryAcquireRenderSlot(&renderSlot)) {
+            msleep(kNoFreeSlotSleepMs);
+            continue;
+        }
+
         GLuint texture = 0U;
         error.clear();
 
-        {
-            ScopedGlesLock lock;
-            if (!context.makeCurrent(m_surface.data())) {
-                emit initializationFailed(QStringLiteral("Failed to make worker context current for processing."));
-                break;
-            }
-
-            texture = backend->processFrame(size, frameIndex, &error);
-            if (texture == 0U) {
-                context.doneCurrent();
-                emit initializationFailed(error.isEmpty()
-                                              ? QStringLiteral("The GPU algorithm backend returned an invalid texture.")
-                                              : error);
-                break;
-            }
-
-            // Cross-context handoff is conservative on ES2/ANGLE.
-            context.functions()->glFinish();
-            context.doneCurrent();
+        if (!makeWorkerContextCurrent(&context, "processing", &error)) {
+            m_framePool->abandonRenderSlot(renderSlot);
+            emit initializationFailed(error);
+            break;
         }
 
-        emit textureReady(texture, size, frameIndex);
+        texture = backend->processFrame(renderSlot, size, frameIndex, &error);
+        if (texture == 0U) {
+            context.doneCurrent();
+            sharedGlesMutex().unlock();
+            m_framePool->abandonRenderSlot(renderSlot);
+            emit initializationFailed(error.isEmpty()
+                                          ? QStringLiteral("The GPU algorithm backend returned an invalid texture.")
+                                          : error);
+            break;
+        }
+
+        // Cross-context handoff is conservative on ES2/ANGLE.
+        context.functions()->glFinish();
+        context.doneCurrent();
+        sharedGlesMutex().unlock();
+
+        SharedTextureFrame frame;
+        if (m_framePool->submitRenderedFrame(renderSlot, size, frameIndex, &frame)) {
+            emit textureReady(frame.slotIndex, frame.textureId, frame.size, frame.frameIndex);
+        } else {
+            m_framePool->abandonRenderSlot(renderSlot);
+        }
+
         ++frameIndex;
 
         const qint64 elapsedMs = frameTimer.restart();
@@ -412,11 +530,11 @@ void SharedTextureWorker::run()
         }
     }
 
-    {
-        ScopedGlesLock lock;
-        if (context.makeCurrent(m_surface.data())) {
-            backend->shutdown();
-            context.doneCurrent();
-        }
+    if (makeWorkerContextCurrent(&context, "shutdown", nullptr)) {
+        backend->shutdown();
+        context.doneCurrent();
+        sharedGlesMutex().unlock();
     }
+
+    m_framePool->reset();
 }
