@@ -35,6 +35,16 @@ public:
         m_slots[slotIndex].textureId = textureId;
     }
 
+    quint32 textureIdForSlot(int slotIndex) const
+    {
+        QMutexLocker locker(&m_mutex);
+        if (!isValidSlotIndex(slotIndex)) {
+            return 0U;
+        }
+
+        return m_slots[slotIndex].textureId;
+    }
+
     bool tryAcquireRenderSlot(int *slotIndex)
     {
         QMutexLocker locker(&m_mutex);
@@ -185,3 +195,5 @@ private:
     int m_frontSlot = -1;
     int m_pendingSlot = -1;
 };
+
+Q_DECLARE_METATYPE(SharedTextureFramePool *)

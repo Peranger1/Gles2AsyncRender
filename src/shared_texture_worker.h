@@ -1,50 +1,70 @@
 #pragma once
 
+#include "image_effect_types.h"
+
+#include <QObject>
 #include <QMutex>
-#include <QPointer>
 #include <QSize>
 #include <QSurfaceFormat>
-#include <QThread>
+#include <QVector>
+#include <QtGui/qopengl.h>
 
 #include <memory>
 
-class QOffscreenSurface;
-class QOpenGLContext;
+class SharedGlContextHandle;
 class SharedTextureFramePool;
+class ImageProcessingPipeline;
 
-class SharedTextureWorker final : public QThread
+class SharedTextureWorker final : public QObject
 {
     Q_OBJECT
 
 public:
-    SharedTextureWorker(QOpenGLContext *shareContext,
-                        QOffscreenSurface *surface,
-                        std::shared_ptr<SharedTextureFramePool> framePool,
-                        const QSurfaceFormat &format,
-                        QObject *parent = nullptr);
+    explicit SharedTextureWorker(QObject *parent = nullptr);
     ~SharedTextureWorker() override;
-
-    void setOutputSize(const QSize &size);
-    void stop();
 
 signals:
     void textureReady(int slotIndex, quint32 textureId, QSize size, quint64 frameIndex);
     void initializationFailed(const QString &reason);
     void statusMessage(const QString &message);
+    void imageDirectoryLoadFinished(
+        bool loaded,
+        const QString &errorMessage,
+        int currentIndex,
+        int count,
+        const QString &displayName);
+    void imageSelectionChanged(int currentIndex, int count, const QString &displayName);
 
-protected:
-    void run() override;
+public slots:
+    bool initialize(SharedGlContextHandle *handle,
+                    SharedTextureFramePool *framePool,
+                    QSize outputSize);
+    void setOutputSize(QSize size);
+    void loadImageDirectory(const QString &directoryPath);
+    void selectNextImage();
+    void selectPreviousImage();
+    void setEffectParameters(const ImageEffectParameters &parameters);
+    void requestRender();
+    void shutdown();
 
 private:
     QSize currentOutputSize() const;
-    bool makeWorkerContextCurrent(QOpenGLContext *context, const char *phase, QString *error);
-    QString describeContextState(const QOpenGLContext *context) const;
+    bool makeWorkerContextCurrent(const char *phase, QString *error);
+    bool ensureSharedTextureForSlot(int slotIndex, const QSize &size, QString *error);
+    QString describeContextState() const;
+    void scheduleRender(int delayMs = 0);
+    void emitImageSelection();
 
-    QPointer<QOpenGLContext> m_shareContext;
-    QPointer<QOffscreenSurface> m_surface;
-    std::shared_ptr<SharedTextureFramePool> m_framePool;
-    QSurfaceFormat m_format;
+    SharedGlContextHandle *m_handle = nullptr;
+    SharedTextureFramePool *m_framePool = nullptr;
+    std::unique_ptr<ImageProcessingPipeline> m_pipeline;
+    QVector<GLuint> m_sharedTextures;
+    QVector<QSize> m_allocatedSizes;
 
-    mutable QMutex m_sizeMutex;
+    mutable QMutex m_stateMutex;
     QSize m_outputSize;
+    ImageEffectParameters m_effectParameters;
+    bool m_initialized = false;
+    bool m_renderScheduled = false;
+    quint64 m_frameIndex = 0;
 };

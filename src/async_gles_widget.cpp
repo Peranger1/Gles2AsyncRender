@@ -2,11 +2,10 @@
 
 #include "angle_threading.h"
 #include "gles_thread_guard.h"
+#include "shared_gl_environment.h"
 #include "shared_texture_frame_pool.h"
-#include "shared_texture_worker.h"
 
 #include <QDebug>
-#include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QPaintEvent>
 #include <QResizeEvent>
@@ -30,6 +29,7 @@ constexpr GLfloat kTexCoords[] = {
 
 AsyncGlesWidget::AsyncGlesWidget(QWidget *parent)
     : QOpenGLWidget(parent)
+    , m_framePool(std::make_shared<SharedTextureFramePool>(3))
 {
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 
@@ -37,14 +37,16 @@ AsyncGlesWidget::AsyncGlesWidget(QWidget *parent)
     connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::unlockForComposition, Qt::DirectConnection);
     connect(this, &QOpenGLWidget::aboutToResize, this, &AsyncGlesWidget::lockForComposition, Qt::DirectConnection);
     connect(this, &QOpenGLWidget::resized, this, &AsyncGlesWidget::unlockForComposition, Qt::DirectConnection);
-    connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::startWorkerIfNeeded, Qt::QueuedConnection);
+    connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::notifyDisplayReadyForWorker, Qt::QueuedConnection);
     connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::onFrameSwapped, Qt::DirectConnection);
 }
 
 AsyncGlesWidget::~AsyncGlesWidget()
 {
-    stopWorker();
     unlockForComposition();
+
+    delete m_pendingFrame;
+    m_pendingFrame = nullptr;
 
     if (context()) {
         ScopedGlesLock lock;
@@ -52,12 +54,6 @@ AsyncGlesWidget::~AsyncGlesWidget()
         m_program.removeAllShaders();
         doneCurrent();
     }
-}
-
-QSize AsyncGlesWidget::outputPixelSize() const
-{
-    const qreal dpr = devicePixelRatioF();
-    return QSize(qMax(1, qRound(width() * dpr)), qMax(1, qRound(height() * dpr)));
 }
 
 bool AsyncGlesWidget::createProgram()
@@ -105,11 +101,25 @@ bool AsyncGlesWidget::createProgram()
     return m_positionLocation >= 0 && m_texCoordLocation >= 0 && m_samplerLocation >= 0;
 }
 
+void AsyncGlesWidget::setSharedGlEnvironment(SharedGlEnvironment *environment)
+{
+    m_sharedGlEnvironment = environment;
+}
+
+QSize AsyncGlesWidget::outputPixelSize() const
+{
+    const qreal dpr = devicePixelRatioF();
+    return QSize(qMax(1, qRound(width() * dpr)), qMax(1, qRound(height() * dpr)));
+}
+
+SharedTextureFramePool *AsyncGlesWidget::framePool() const
+{
+    return m_framePool.get();
+}
+
 void AsyncGlesWidget::initializeGL()
 {
     ScopedGlesLock lock;
-
-    stopWorker();
 
     initializeOpenGLFunctions();
     glDisable(GL_DEPTH_TEST);
@@ -126,24 +136,17 @@ void AsyncGlesWidget::initializeGL()
         return;
     }
 
-    m_surface = std::make_unique<QOffscreenSurface>();
-    m_surface->setScreen(context()->screen());
-    m_surface->setFormat(context()->format());
-    m_surface->create();
-    if (!m_surface->isValid()) {
-        qWarning() << "Failed to create offscreen surface for worker.";
-        return;
+    if (m_sharedGlEnvironment != nullptr) {
+        m_sharedGlEnvironment->initializeFromDisplay(context(), format());
     }
 
-    m_framePool = std::make_shared<SharedTextureFramePool>(3);
-    m_worker = std::make_unique<SharedTextureWorker>(context(), m_surface.get(), m_framePool, context()->format(), this);
-    connect(m_worker.get(), &SharedTextureWorker::textureReady, this, &AsyncGlesWidget::onTextureReady);
-    connect(m_worker.get(), &SharedTextureWorker::initializationFailed, this, &AsyncGlesWidget::onWorkerError);
-    connect(m_worker.get(), &SharedTextureWorker::statusMessage, this, &AsyncGlesWidget::onWorkerStatus);
-
     m_acceptFrames = true;
-    m_workerStartPending = true;
-    m_worker->setOutputSize(outputPixelSize());
+    m_workerReadyPending = true;
+    if (m_framePool) {
+        m_framePool->reset();
+    }
+    emit outputSizeChanged(outputPixelSize());
+    emit glInitialized();
 }
 
 void AsyncGlesWidget::paintEvent(QPaintEvent *event)
@@ -160,9 +163,7 @@ void AsyncGlesWidget::resizeEvent(QResizeEvent *event)
 
 void AsyncGlesWidget::resizeGL(int, int)
 {
-    if (m_worker) {
-        m_worker->setOutputSize(outputPixelSize());
-    }
+    emit outputSizeChanged(outputPixelSize());
 }
 
 void AsyncGlesWidget::paintGL()
@@ -228,15 +229,14 @@ void AsyncGlesWidget::onWorkerStatus(const QString &message)
     qInfo().noquote() << message;
 }
 
-void AsyncGlesWidget::startWorkerIfNeeded()
+void AsyncGlesWidget::notifyDisplayReadyForWorker()
 {
-    if (!m_workerStartPending || !m_worker || m_worker->isRunning()) {
+    if (!m_workerReadyPending) {
         return;
     }
 
-    m_worker->setOutputSize(outputPixelSize());
-    m_workerStartPending = false;
-    m_worker->start();
+    m_workerReadyPending = false;
+    emit displayReadyForWorker();
 }
 
 void AsyncGlesWidget::onFrameSwapped()
@@ -269,26 +269,4 @@ void AsyncGlesWidget::unlockForComposition()
 
     m_compositionLocked = false;
     sharedGlesMutex().unlock();
-}
-
-void AsyncGlesWidget::stopWorker()
-{
-    m_acceptFrames = false;
-    m_workerStartPending = false;
-
-    delete m_pendingFrame;
-    m_pendingFrame = nullptr;
-
-    if (m_worker) {
-        disconnect(m_worker.get(), nullptr, this, nullptr);
-        m_worker->stop();
-        m_worker.reset();
-    }
-    m_framePool.reset();
-
-    m_displayTexture = 0U;
-    m_displayTextureSize = QSize();
-    m_displayFrame = 0U;
-    m_frontSlot = -1;
-    m_retiringSlot = -1;
 }

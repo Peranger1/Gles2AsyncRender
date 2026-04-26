@@ -6,13 +6,12 @@
 
 #include <memory>
 
-class QOffscreenSurface;
 class QPaintEvent;
 class QResizeEvent;
+class SharedGlEnvironment;
 
 struct SharedTextureFrame;
 class SharedTextureFramePool;
-class SharedTextureWorker;
 
 class AsyncGlesWidget final : public QOpenGLWidget, protected QOpenGLFunctions
 {
@@ -22,6 +21,10 @@ public:
     explicit AsyncGlesWidget(QWidget *parent = nullptr);
     ~AsyncGlesWidget() override;
 
+    void setSharedGlEnvironment(SharedGlEnvironment *environment);
+    QSize outputPixelSize() const;
+    SharedTextureFramePool *framePool() const;
+
 protected:
     void initializeGL() override;
     void paintEvent(QPaintEvent *event) override;
@@ -29,19 +32,24 @@ protected:
     void resizeGL(int w, int h) override;
     void paintGL() override;
 
-private slots:
+signals:
+    void glInitialized();
+    void outputSizeChanged(const QSize &outputSize);
+    void displayReadyForWorker();
+
+public slots:
     void onTextureReady(int slotIndex, quint32 textureId, QSize size, quint64 frameIndex);
     void onWorkerError(const QString &reason);
     void onWorkerStatus(const QString &message);
-    void startWorkerIfNeeded();
+
+private slots:
+    void notifyDisplayReadyForWorker();
     void onFrameSwapped();
 
 private:
-    QSize outputPixelSize() const;
     bool createProgram();
     void lockForComposition();
     void unlockForComposition();
-    void stopWorker();
 
     QOpenGLShaderProgram m_program;
     int m_positionLocation = -1;
@@ -56,9 +64,8 @@ private:
     SharedTextureFrame *m_pendingFrame = nullptr;
     bool m_acceptFrames = false;
     bool m_compositionLocked = false;
-    bool m_workerStartPending = false;
+    bool m_workerReadyPending = false;
 
-    std::unique_ptr<QOffscreenSurface> m_surface;
+    SharedGlEnvironment *m_sharedGlEnvironment = nullptr;
     std::shared_ptr<SharedTextureFramePool> m_framePool;
-    std::unique_ptr<SharedTextureWorker> m_worker;
 };

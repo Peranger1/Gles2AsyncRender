@@ -1,8 +1,11 @@
 #include <QApplication>
-#include <QMainWindow>
+#include <QMetaType>
 #include <QSurfaceFormat>
 
-#include "async_gles_widget.h"
+#include "image_effect_types.h"
+#include "main_window.h"
+#include "shared_gl_context_handle.h"
+#include "shared_texture_frame_pool.h"
 
 int main(int argc, char *argv[])
 {
@@ -24,11 +27,11 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Gles2AsyncRender"));
+    qRegisterMetaType<ImageEffectParameters>("ImageEffectParameters");
+    qRegisterMetaType<SharedGlContextHandle *>("SharedGlContextHandle*");
+    qRegisterMetaType<SharedTextureFramePool *>("SharedTextureFramePool*");
 
-    QMainWindow window;
-    window.setWindowTitle(QStringLiteral("QOpenGLWidget GLES2 Async Shared Texture Demo"));
-    window.resize(1280, 720);
-    window.setCentralWidget(new AsyncGlesWidget(&window));
+    MainWindow window;
     window.show();
 
     return app.exec();

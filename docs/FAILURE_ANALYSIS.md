@@ -49,6 +49,26 @@
 - 显示侧改为 `front / pending / retiring / free` 槽位协议
 - worker 侧改为只对当前 render slot 做纹理重分配，避免 resize 时破坏正在显示的 front texture
 
+到了 `2026-04-26` 晚些时候，样例又从“最小共享纹理验证程序”演进成了一个更接近真实接入方式的图像处理 demo：
+
+- UI 侧新增 `MainWindow`
+- worker 改成 `QObject + moveToThread`
+- 支持导入图片目录
+- worker 上下文内执行亮度、对比度、缩放、平移、旋转和翻转
+- 输出图像改为按宽高比显示
+
+这轮演进又暴露出几类新的应用层问题：
+
+- 导入图片目录时报错 `Source image upload prerequisites are not ready.`
+- 目录加载成功但 widget 没有显示任何图片
+- 图像初版显示为强制拉伸铺满 widget，不符合图像处理预览场景
+
+这些问题已经不再属于底层 ANGLE/D3D11 多线程损坏，而是：
+
+- worker 图像上传时机问题
+- 共享纹理槽位注册时序问题
+- 输出几何计算策略不符合图像预览需求
+
 最新代码已在 `2026-04-26` 使用 `vcvars64.bat + qmake + nmake` 编译通过。最终的 live-resize 观感仍应以最新运行验证结果为准。
 
 ## 当前结论
@@ -64,6 +84,7 @@
 
 - 启动阶段的 `eglError: 3006` 不是新的 ANGLE/D3D11 底层损坏，而是 worker 共享上下文在 `QOpenGLWidget` 首帧初始化尚未完全稳定时过早 `makeCurrent()`
 - resize 期间的透明伪影不是共享上下文本身失效，而是显示协议和纹理重分配策略还不够严格
+- 在当前 demo 形态下，后续出现的目录加载失败和“加载成功但不显示”都属于应用层资源准备顺序错误，而不是共享上下文模型失效
 
 ## 故障时间线
 
@@ -353,6 +374,111 @@
 - 这一步是解决 live resize 透明伪影的关键结构修正
 - 最新代码已编译通过，运行时最终效果仍以用户最新验证为准
 
+### 10. 样例重构为图像处理 demo 后，worker 架构从“线程内自管”收敛为 `QObject + moveToThread`
+
+这轮调整不是为了修一个单点 crash，而是为了让样例结构更接近未来真实算法库接入形态。
+
+旧的最小验证程序更像“线程 + widget + 共享纹理”的直接拼装，而新的结构调整为：
+
+- `MainWindow` 负责 UI、菜单、状态栏、参数面板和 worker 线程生命周期
+- `SharedTextureWorker` 只保留为 worker object
+- worker object 被 `moveToThread()` 到独立 `QThread`
+- 显示初始化、worker 初始化、目录加载和重绘请求都通过 Qt 信号槽串接
+
+这样做的原因是：
+
+- 未来真实 GPU 算法库不会只暴露一个“单帧渲染函数”
+- 它通常需要目录/资源加载、一次性初始化、参数更新、状态切换和逐帧执行
+- 这些动作更适合落在稳定的 worker object 生命周期上，而不是继续塞进零散的演示线程逻辑
+
+这一轮不是为了解决 ANGLE 崩溃本身，但它为后续图像处理 demo 的问题暴露和定位创造了更清晰的边界。
+
+### 11. 导入图片目录时报错 `Source image upload prerequisites are not ready`
+
+在引入图片目录加载后，用户第一次验证时弹出错误：
+
+- `Source image upload prerequisites are not ready`
+
+根因分析：
+
+- `ImageProcessingPipeline::loadImageDirectory()` 在加载首张图片后，直接走到了上传路径
+- 但此时 `m_sourceTexture` 还没有通过 `ensureSourceTexture()` 建立
+- 于是 `uploadCurrentImage()` 看到的前置条件不满足：
+  - `m_gl == nullptr` 或
+  - `m_sourceTexture == 0` 或
+  - 当前图像为空
+- 最终把“纹理尚未创建”的问题报成了“上传前置条件不满足”
+
+采取的修改：
+
+- 在 `loadImageDirectory()` 末尾不再直接依赖后续渲染阶段隐式建纹理
+- 改为先显式调用 `ensureSourceTexture(context, error)`
+
+结果：
+
+- 目录导入路径开始具备自洽的首图上传流程
+- 这类失败被收敛为真正的图片读取或 GL 上传错误，不再因为源纹理未初始化而提前中断
+
+### 12. 目录加载成功但没有显示图片
+
+修掉首图上传前置条件问题后，下一轮又出现：
+
+- 没有弹窗报错
+- 目录也能正常加载
+- 但 widget 区域没有显示图片
+
+根因分析：
+
+- 当前显示协议要求 worker 必须先拿到一个可用 render slot，才能把新帧提交成 `pending`
+- `SharedTextureFramePool::tryAcquireRenderSlot()` 只会返回那些已经注册了有效 `textureId` 的槽位
+- 但那一版代码里，共享纹理是在 worker 真正拿到 render slot 之后才懒创建
+- 这就形成了循环依赖：
+  - 没有注册纹理，就拿不到 render slot
+  - 拿不到 render slot，就永远走不到创建并注册纹理的代码
+
+采取的修改：
+
+- 在 `SharedTextureWorker::initialize(...)` 阶段一次性为全部 worker 槽位创建共享纹理
+- 初始化完成后立刻调用 `m_framePool->registerTexture(i, textureId)`
+- 然后再 `reset()` 槽位状态机
+
+结果：
+
+- worker 第一次请求渲染时就能拿到有效 render slot
+- 目录加载完成后，首帧可以真正进入 `pending -> front` 提交流程
+- 这说明“不显示”问题来自槽位注册顺序，而不是共享上下文或 shader/FBO 本身失效
+
+### 13. 图像显示方式从“强制铺满”收敛为“按宽高比显示”
+
+在图片能够正常显示后，demo 仍有一个明显问题：
+
+- 输出图像被直接铺满整个 widget
+- 对图像处理预览场景来说，这会引入非算法本身的几何畸变
+
+根因分析：
+
+- 初版 `ImageProcessingPipeline::updateGeometry(...)` 相当于默认把内容 quad 固定铺到完整 NDC
+- 这适合“全屏贴图显示”示例，不适合“图像预览”型 demo
+- 一旦源图和输出纹理宽高比不一致，就会被拉伸
+
+采取的修改：
+
+- 在 `updateGeometry(...)` 中显式比较：
+  - 源图宽高比
+  - 输出纹理宽高比
+- 按 aspect-fit 规则计算基础 quad 的半宽和半高
+- 之后再叠加：
+  - zoom
+  - pan
+  - rotation
+  - flip
+
+结果：
+
+- 图像预览不再被默认拉伸
+- 当前 demo 的几何行为更接近真实图像处理界面
+- 后续若接入真实算法库，显示结果也不会再混入“显示层强制铺满”带来的假畸变
+
 ## 为什么当前互斥锁仍然不是万能解
 
 当前互斥锁只能保护应用显式执行的 GL 代码区段，它无法完全控制：
@@ -367,6 +493,12 @@
 
 当前代码被有意保留为未来真实 GPU 算法库接入所需的结构：
 
+- `src/main_window.cpp`
+  - 持有主窗口 UI
+  - 持有 worker `QThread`
+  - 在显示首帧 `frameSwapped()` 之后触发 worker 初始化
+  - 负责目录导入、参数下发、状态展示和重绘请求
+
 - `src/async_gles_widget.cpp`
   - 持有显示侧 `QOpenGLWidget`
   - 持有显示侧 front/pending 状态
@@ -374,11 +506,23 @@
   - 旧 front 会在 `frameSwapped()` 后再回收
 
 - `src/shared_texture_worker.cpp`
-  - 持有 worker 线程
-  - 创建共享 GLES2 上下文
-  - 在 worker 上下文内运行演示 GPU 后端
+  - 作为 worker object 被移动到独立 `QThread`
+  - 使用 `SharedGlContextHandle` 持有共享 GLES2 上下文和离屏 surface
+  - 在 worker 上下文内运行图像处理 demo 管线
+  - 初始化阶段就为全部共享槽位创建并注册纹理
   - 只对当前 render slot 渲染
   - 把新帧先提交为 pending，再交给 widget 提升为 front
+
+- `src/shared_gl_environment.cpp`
+  - 从显示上下文派生共享环境
+  - 创建 worker 使用的共享上下文和 `QOffscreenSurface`
+
+- `src/shared_gl_context_handle.cpp`
+  - 封装 worker 侧 `makeCurrent()` / `doneCurrent()` 生命周期
+
+- `src/image_processing_pipeline.cpp`
+  - 负责图片目录扫描和首图加载
+  - 负责源图上传、FBO 输出、图像效果 shader 和 aspect-fit 几何
 
 - `src/shared_texture_frame_pool.h`
   - 定义共享纹理槽位池
@@ -396,7 +540,7 @@
 当前问题实际上分成两类，不应混为一谈：
 
 1. 应用层资源与生命周期问题
-   - 例如 resize 黑屏、启动阶段 `eglError: 3006`、front texture 被错误重分配
+   - 例如 resize 黑屏、启动阶段 `eglError: 3006`、front texture 被错误重分配、目录加载时源纹理未创建、共享槽位注册顺序错误
    - 这些问题可以在样例代码内部修复
 
 2. 后端结构性线程冲突
@@ -490,6 +634,9 @@
 - worker 报错 `Failed to make worker context current`
 - 启动时序调整后，resize 期间出现“瞬间透明”
 - 第一次 front/back 收敛后，现象变成“缩放期间持续透明，停止后恢复显示”
+- 图像目录导入时报错 `Source image upload prerequisites are not ready`
+- 目录加载成功但 widget 没有显示图片
+- 图像显示初版为强制铺满，随后收敛为按宽高比显示
 - `eglGetCurrentDisplay` 返回 `EGL_NO_DISPLAY`
 - `eglQueryDisplayAttribEXT(EGL_DEVICE_EXT)` 返回 EGL 错误 `0x3008`
 - `nativeResourceForContext("egldisplay")` 虽返回非空指针，但无法被 `eglQueryString` 接受
@@ -547,8 +694,16 @@
 
 ## 相关文件
 
+- `src/main_window.cpp`
+- `src/main_window.h`
 - `src/async_gles_widget.cpp`
 - `src/async_gles_widget.h`
+- `src/image_processing_pipeline.cpp`
+- `src/image_processing_pipeline.h`
+- `src/shared_gl_environment.cpp`
+- `src/shared_gl_environment.h`
+- `src/shared_gl_context_handle.cpp`
+- `src/shared_gl_context_handle.h`
 - `src/shared_texture_frame_pool.h`
 - `src/shared_texture_worker.cpp`
 - `src/shared_texture_worker.h`
