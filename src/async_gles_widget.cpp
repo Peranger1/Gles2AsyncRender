@@ -34,9 +34,8 @@ AsyncGlesWidget::AsyncGlesWidget(QWidget *parent)
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 
     connect(this, &QOpenGLWidget::aboutToCompose, this, &AsyncGlesWidget::lockForComposition, Qt::DirectConnection);
+    connect(this, &QOpenGLWidget::aboutToCompose, this, &AsyncGlesWidget::onAboutToCompose, Qt::DirectConnection);
     connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::unlockForComposition, Qt::DirectConnection);
-    connect(this, &QOpenGLWidget::aboutToResize, this, &AsyncGlesWidget::lockForComposition, Qt::DirectConnection);
-    connect(this, &QOpenGLWidget::resized, this, &AsyncGlesWidget::unlockForComposition, Qt::DirectConnection);
     connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::notifyDisplayReadyForWorker, Qt::QueuedConnection);
     connect(this, &QOpenGLWidget::frameSwapped, this, &AsyncGlesWidget::onFrameSwapped, Qt::DirectConnection);
 }
@@ -51,6 +50,9 @@ AsyncGlesWidget::~AsyncGlesWidget()
     if (context()) {
         ScopedGlesLock lock;
         makeCurrent();
+        if (m_framePool) {
+            m_framePool->releaseAllFences(context());
+        }
         m_program.removeAllShaders();
         doneCurrent();
     }
@@ -120,7 +122,6 @@ SharedTextureFramePool *AsyncGlesWidget::framePool() const
 void AsyncGlesWidget::initializeGL()
 {
     ScopedGlesLock lock;
-
     initializeOpenGLFunctions();
     glDisable(GL_DEPTH_TEST);
     glClearColor(0.08f, 0.09f, 0.11f, 1.0f);
@@ -163,6 +164,7 @@ void AsyncGlesWidget::resizeEvent(QResizeEvent *event)
 
 void AsyncGlesWidget::resizeGL(int, int)
 {
+    ScopedGlesLock lock;
     emit outputSizeChanged(outputPixelSize());
 }
 
@@ -170,16 +172,25 @@ void AsyncGlesWidget::paintGL()
 {
     ScopedGlesLock lock;
 
-    if (m_pendingFrame && m_retiringSlot == -1 && m_framePool) {
+    if (m_pendingFrame && m_framePool) {
         int retiredSlot = -1;
-        if (m_framePool->promotePendingFrame(m_pendingFrame->slotIndex, &retiredSlot)) {
-            m_frontSlot = m_pendingFrame->slotIndex;
-            m_displayTexture = m_pendingFrame->textureId;
-            m_displayTextureSize = m_pendingFrame->size;
-            m_displayFrame = m_pendingFrame->frameIndex;
+        SharedTextureFrame promotedFrame;
+        QString error;
+        if (m_framePool->consumePendingFrame(
+                m_pendingFrame->slotIndex,
+                context(),
+                &retiredSlot,
+                &promotedFrame,
+                &error)) {
+            m_frontSlot = promotedFrame.slotIndex;
+            m_displayTexture = promotedFrame.textureId;
+            m_displayTextureSize = promotedFrame.size;
+            m_displayFrame = promotedFrame.frameIndex;
             m_retiringSlot = retiredSlot;
             delete m_pendingFrame;
             m_pendingFrame = nullptr;
+        } else if (!error.isEmpty()) {
+            qWarning() << "Failed to consume pending frame:" << error;
         }
     }
 
@@ -239,8 +250,19 @@ void AsyncGlesWidget::notifyDisplayReadyForWorker()
     emit displayReadyForWorker();
 }
 
+void AsyncGlesWidget::onAboutToCompose()
+{
+    if (m_framePool) {
+        m_framePool->markFrontSlotComposing(true);
+    }
+}
+
 void AsyncGlesWidget::onFrameSwapped()
 {
+    if (m_framePool) {
+        m_framePool->markFrontSlotComposing(false);
+    }
+
     if (m_retiringSlot != -1 && m_framePool) {
         m_framePool->releaseRetiredSlot(m_retiringSlot);
         m_retiringSlot = -1;

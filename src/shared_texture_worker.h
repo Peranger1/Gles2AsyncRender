@@ -52,6 +52,7 @@ private:
     QSize currentOutputSize() const;
     bool makeWorkerContextCurrent(const char *phase, QString *error);
     bool ensureSharedTextureForSlot(int slotIndex, const QSize &size, QString *error);
+    bool initializeSyncFunctions(QString *statusMessage);
     QString describeContextState() const;
     void scheduleRender(int delayMs = 0);
     void emitImageSelection();
@@ -67,5 +68,6 @@ private:
     ImageEffectParameters m_effectParameters;
     bool m_initialized = false;
     bool m_renderScheduled = false;
+    bool m_syncSupported = false;
     quint64 m_frameIndex = 0;
 };

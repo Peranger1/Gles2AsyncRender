@@ -43,13 +43,14 @@ public slots:
     void onWorkerStatus(const QString &message);
 
 private slots:
+    void lockForComposition();
+    void unlockForComposition();
+    void onAboutToCompose();
     void notifyDisplayReadyForWorker();
     void onFrameSwapped();
 
 private:
     bool createProgram();
-    void lockForComposition();
-    void unlockForComposition();
 
     QOpenGLShaderProgram m_program;
     int m_positionLocation = -1;
@@ -63,8 +64,8 @@ private:
     int m_retiringSlot = -1;
     SharedTextureFrame *m_pendingFrame = nullptr;
     bool m_acceptFrames = false;
-    bool m_compositionLocked = false;
     bool m_workerReadyPending = false;
+    bool m_compositionLocked = false;
 
     SharedGlEnvironment *m_sharedGlEnvironment = nullptr;
     std::shared_ptr<SharedTextureFramePool> m_framePool;

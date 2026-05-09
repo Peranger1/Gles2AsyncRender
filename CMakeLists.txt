@@ -17,9 +17,9 @@ add_executable(Gles2AsyncRender
     src/angle_threading.h
     src/async_gles_widget.cpp
     src/async_gles_widget.h
+    src/main.cpp
     src/gles_thread_guard.cpp
     src/gles_thread_guard.h
-    src/main.cpp
     src/shared_texture_worker.cpp
     src/shared_texture_worker.h
 )

@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QMutexLocker>
 #include <QOpenGLContext>
+#include <QOpenGLExtraFunctions>
 #include <QOpenGLFunctions>
 #include <QThread>
 #include <QTimer>
@@ -68,6 +69,7 @@ bool SharedTextureWorker::initialize(SharedGlContextHandle *handle,
             << "isOpenGLES=" << m_handle->context()->isOpenGLES()
             << "format=" << m_handle->context()->format();
 
+    ScopedGlesLock lock;
     QString error;
     if (!makeWorkerContextCurrent("initialization", &error)) {
         emit initializationFailed(error);
@@ -80,9 +82,19 @@ bool SharedTextureWorker::initialize(SharedGlContextHandle *handle,
     const AngleThreadingInfo angleInfo = ensureAngleD3D11MultithreadProtection();
     emit statusMessage(angleInfo.message);
 
+    QString syncStatusMessage;
+    if (!initializeSyncFunctions(&syncStatusMessage)) {
+        m_handle->doneCurrent();
+        emit initializationFailed(QStringLiteral("Failed to initialize GL sync functions."));
+        delete m_handle;
+        m_handle = nullptr;
+        m_framePool = nullptr;
+        return false;
+    }
+    emit statusMessage(syncStatusMessage);
+
     if (!m_pipeline->initialize(m_handle->context(), &error)) {
         m_handle->doneCurrent();
-        sharedGlesMutex().unlock();
         emit initializationFailed(error);
         delete m_handle;
         m_handle = nullptr;
@@ -95,7 +107,6 @@ bool SharedTextureWorker::initialize(SharedGlContextHandle *handle,
         gl->glGenTextures(m_sharedTextures.size(), m_sharedTextures.data());
         if (m_sharedTextures[0] == 0U) {
             m_handle->doneCurrent();
-            sharedGlesMutex().unlock();
             emit initializationFailed(QStringLiteral("Failed to create shared textures for worker slots."));
             delete m_handle;
             m_handle = nullptr;
@@ -111,7 +122,6 @@ bool SharedTextureWorker::initialize(SharedGlContextHandle *handle,
     m_framePool->reset();
 
     m_handle->doneCurrent();
-    sharedGlesMutex().unlock();
 
     m_initialized = true;
     return true;
@@ -138,6 +148,7 @@ void SharedTextureWorker::loadImageDirectory(const QString &directoryPath)
         return;
     }
 
+    ScopedGlesLock lock;
     QString error;
     if (!makeWorkerContextCurrent("loadImageDirectory", &error)) {
         emit imageDirectoryLoadFinished(false, error, -1, 0, {});
@@ -150,7 +161,6 @@ void SharedTextureWorker::loadImageDirectory(const QString &directoryPath)
     }
 
     m_handle->doneCurrent();
-    sharedGlesMutex().unlock();
 
     if (!loaded) {
         emit imageDirectoryLoadFinished(false, error, -1, 0, {});
@@ -214,6 +224,7 @@ void SharedTextureWorker::requestRender()
         return;
     }
 
+    ScopedGlesLock lock;
     QString error;
     if (!makeWorkerContextCurrent("processing", &error)) {
         m_framePool->abandonRenderSlot(renderSlot);
@@ -223,7 +234,6 @@ void SharedTextureWorker::requestRender()
 
     if (!ensureSharedTextureForSlot(renderSlot, size, &error)) {
         m_handle->doneCurrent();
-        sharedGlesMutex().unlock();
         m_framePool->abandonRenderSlot(renderSlot);
         emit initializationFailed(error);
         return;
@@ -245,7 +255,6 @@ void SharedTextureWorker::requestRender()
         &error);
     if (!rendered) {
         m_handle->doneCurrent();
-        sharedGlesMutex().unlock();
         m_framePool->abandonRenderSlot(renderSlot);
         emit initializationFailed(error.isEmpty()
                                       ? QStringLiteral("Image processing pipeline failed to render a frame.")
@@ -253,14 +262,32 @@ void SharedTextureWorker::requestRender()
         return;
     }
 
-    if (m_handle->context()->functions() != nullptr) {
-        m_handle->context()->functions()->glFinish();
+    GLsync writeFence = nullptr;
+    QOpenGLContext *context = m_handle->context();
+    QOpenGLExtraFunctions *extra = context != nullptr ? context->extraFunctions() : nullptr;
+    if (m_syncSupported && extra != nullptr) {
+        writeFence = extra->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (writeFence != nullptr) {
+            extra->glFlush();
+        } else {
+            qWarning() << "glFenceSync returned null. Falling back to worker-side glFinish for this frame.";
+            if (context != nullptr && context->functions() != nullptr) {
+                context->functions()->glFinish();
+            }
+        }
+    } else if (context != nullptr && context->functions() != nullptr) {
+        context->functions()->glFinish();
     }
+
+    QThread::currentThread()->msleep(150);
 
     const double elapsedMs = double(renderTimer.nsecsElapsed()) / 1000000.0;
 
+    if (m_framePool != nullptr) {
+        m_framePool->updateSlotFence(renderSlot, writeFence, m_syncSupported && writeFence != nullptr);
+    }
+
     m_handle->doneCurrent();
-    sharedGlesMutex().unlock();
 
     SharedTextureFrame frame;
     if (m_framePool->submitRenderedFrame(renderSlot, size, m_frameIndex, &frame)) {
@@ -276,13 +303,16 @@ void SharedTextureWorker::requestRender()
 
 void SharedTextureWorker::shutdown()
 {
+    ScopedGlesLock lock;
     if (m_handle != nullptr && m_pipeline != nullptr && makeWorkerContextCurrent("shutdown", nullptr)) {
+        if (m_framePool != nullptr) {
+            m_framePool->releaseAllFences(m_handle->context());
+        }
         if (!m_sharedTextures.isEmpty()) {
             m_handle->context()->functions()->glDeleteTextures(m_sharedTextures.size(), m_sharedTextures.data());
         }
         m_pipeline->release(m_handle->context());
         m_handle->doneCurrent();
-        sharedGlesMutex().unlock();
     }
 
     delete m_handle;
@@ -311,11 +341,9 @@ bool SharedTextureWorker::makeWorkerContextCurrent(const char *phase, QString *e
     }
 
     for (int attempt = 1; attempt <= kMakeCurrentRetryCount; ++attempt) {
-        sharedGlesMutex().lock();
         if (m_handle->makeCurrent()) {
             return true;
         }
-        sharedGlesMutex().unlock();
 
         qWarning().noquote()
             << QStringLiteral("Worker makeCurrent failed during %1 (attempt %2/%3). %4")
@@ -395,6 +423,35 @@ bool SharedTextureWorker::ensureSharedTextureForSlot(int slotIndex, const QSize 
     }
 
     m_allocatedSizes[slotIndex] = size;
+    return true;
+}
+
+bool SharedTextureWorker::initializeSyncFunctions(QString *statusMessage)
+{
+    QOpenGLContext *context = m_handle != nullptr ? m_handle->context() : nullptr;
+    QOpenGLExtraFunctions *extra = context != nullptr ? context->extraFunctions() : nullptr;
+    const bool isAngleGles2 = context != nullptr
+        && context->isOpenGLES()
+        && QOpenGLContext::openGLModuleType() == QOpenGLContext::LibGLES
+        && context->format().majorVersion() <= 2;
+
+    if (isAngleGles2) {
+        m_syncSupported = false;
+        if (statusMessage) {
+            *statusMessage = QStringLiteral(
+                "Synchronization level: Compatibility mode (Qt 5.15.x + ANGLE + GLES2 keeps global GL serialization; "
+                "per-slot GLsync handoff is disabled in this runtime).");
+        }
+        return true;
+    }
+
+    m_syncSupported = extra != nullptr;
+
+    if (statusMessage) {
+        *statusMessage = m_syncSupported
+            ? QStringLiteral("Synchronization level: Level A (per-slot GLsync fence handoff enabled).")
+            : QStringLiteral("Synchronization level: Level B (GLsync unavailable, using worker-side glFinish fallback).");
+    }
     return true;
 }
 
