@@ -10,6 +10,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QVector>
+#include <QDebug>
 #include <QtMath>
 
 #include <cstring>
@@ -30,6 +31,13 @@ QString hresultToString(HRESULT hr)
 bool isAcquireTimeout(HRESULT hr)
 {
     return hr == WAIT_TIMEOUT || hr == DXGI_ERROR_WAIT_TIMEOUT;
+}
+
+void logWorkerMessage(const QString &message)
+{
+    if (!message.isEmpty()) {
+        qInfo().noquote() << "[D3D11NativeWorker]" << message;
+    }
 }
 
 QSize sanitizedSize(const QSize &size)
@@ -714,7 +722,7 @@ bool D3D11NativeWorker::initialize(D3D11NativeSlotPool *slotPool, QSize outputSi
 
     m_slotPool->reset();
     m_initialized = true;
-    emit statusMessage(QStringLiteral("D3D11 native worker initialized. Producer/consumer synchronization now uses shared textures + keyed mutex."));
+    logWorkerMessage(QStringLiteral("Initialized. Producer/consumer synchronization now uses shared textures + keyed mutex."));
     return true;
 }
 
@@ -750,27 +758,31 @@ void D3D11NativeWorker::loadImageDirectory(const QString &directoryPath)
                                         QStringLiteral("D3D11 native worker is not initialized."),
                                         -1,
                                         0,
+                                        {},
                                         {});
         return;
     }
 
-    emit statusMessage(QStringLiteral("D3D11 worker loading image directory: %1").arg(directoryPath));
+    logWorkerMessage(QStringLiteral("Loading image directory: %1").arg(directoryPath));
     QString error;
     const bool loaded = m_impl->loadImageDirectory(directoryPath, &error);
     if (!loaded) {
-        emit statusMessage(QStringLiteral("D3D11 worker image directory load failed: %1").arg(error));
-        emit imageDirectoryLoadFinished(false, error, -1, 0, {});
+        logWorkerMessage(QStringLiteral("Image directory load failed: %1").arg(error));
+        emit imageDirectoryLoadFinished(false, error, -1, 0, {}, {});
         return;
     }
 
-    emit statusMessage(QStringLiteral("D3D11 worker loaded %1 images. Current=%2")
-                           .arg(m_impl->imagePaths.size())
-                           .arg(m_impl->currentDisplayName()));
+    logWorkerMessage(QStringLiteral("Loaded %1 images. Current=%2 size=%3x%4")
+                         .arg(m_impl->imagePaths.size())
+                         .arg(m_impl->currentDisplayName())
+                         .arg(m_impl->currentImage.width())
+                         .arg(m_impl->currentImage.height()));
     emit imageDirectoryLoadFinished(true,
                                     {},
                                     m_impl->currentImageIndex,
                                     m_impl->imagePaths.size(),
-                                    m_impl->currentDisplayName());
+                                    m_impl->currentDisplayName(),
+                                    m_impl->currentImage.size());
     emitImageSelection();
     scheduleRender(0);
 }
@@ -856,7 +868,12 @@ void D3D11NativeWorker::requestRender()
         return;
     }
 
-    emit renderTimingUpdated(double(timer.nsecsElapsed()) / 1000000.0);
+    logWorkerMessage(QStringLiteral("Rendered frame=%1 slot=%2 output=%3x%4 elapsedMs=%5")
+                         .arg(m_frameIndex)
+                         .arg(frame.slotIndex)
+                         .arg(frame.size.width())
+                         .arg(frame.size.height())
+                         .arg(QString::number(double(timer.nsecsElapsed()) / 1000000.0, 'f', 2)));
     emit frameReady(frame.slotIndex, frame.generation, frame.size, frame.frameIndex);
     ++m_frameIndex;
 }
@@ -873,13 +890,14 @@ void D3D11NativeWorker::shutdown()
 void D3D11NativeWorker::emitImageSelection()
 {
     if (!m_impl->hasImage()) {
-        emit imageSelectionChanged(-1, 0, {});
+        emit imageSelectionChanged(-1, 0, {}, {});
         return;
     }
 
     emit imageSelectionChanged(m_impl->currentImageIndex,
                                m_impl->imagePaths.size(),
-                               m_impl->currentDisplayName());
+                               m_impl->currentDisplayName(),
+                               m_impl->currentImage.size());
 }
 
 QSize D3D11NativeWorker::currentOutputSize() const

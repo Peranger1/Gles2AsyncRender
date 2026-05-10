@@ -33,8 +33,6 @@ signals:
     void glInitialized();
     void displayReadyForWorker();
     void outputSizeChanged(QSize size);
-    void statusMessage(const QString &message);
-    void framePresented(quint64 frameIndex, QSize size);
 
 public slots:
     void onFrameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex);

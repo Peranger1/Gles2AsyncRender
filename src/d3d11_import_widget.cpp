@@ -55,6 +55,13 @@ std::array<GLfloat, 8> aspectFitVertices(const QSize &contentSize, const QSize &
              -halfWidth,  halfHeight,
               halfWidth,  halfHeight };
 }
+
+void logImportWidgetMessage(const QString &message)
+{
+    if (!message.isEmpty()) {
+        qInfo().noquote() << "[D3D11ImportWidget]" << message;
+    }
+}
 }
 
 D3D11ImportWidget::D3D11ImportWidget(QWidget *parent)
@@ -95,11 +102,11 @@ void D3D11ImportWidget::initializeGL()
     glClearColor(0.05f, 0.06f, 0.08f, 1.0f);
 
     const AngleThreadingInfo angleInfo = ensureAngleD3D11MultithreadProtection();
-    emit statusMessage(angleInfo.message);
+    logImportWidgetMessage(angleInfo.message);
 
     QString error;
     if (!createProgram(&error)) {
-        emit statusMessage(QStringLiteral("D3D11 import widget shader initialization failed: %1").arg(error));
+        logImportWidgetMessage(QStringLiteral("D3D11 import widget shader initialization failed: %1").arg(error));
         return;
     }
 
@@ -107,20 +114,20 @@ void D3D11ImportWidget::initializeGL()
     m_ownedEglApi = std::make_unique<QtAngleEglTools::ResolvedEglApi>(QtAngleEglTools::resolveEglApi(context(), &probeLog));
     m_eglApi = m_ownedEglApi.get();
     if (!m_eglApi->supportsD3DTextureImport()) {
-        emit statusMessage(QStringLiteral("D3D11 import widget cannot resolve Qt EGL import functions.\n%1")
-                               .arg(probeLog.join(QStringLiteral("\n"))));
+        logImportWidgetMessage(QStringLiteral("D3D11 import widget cannot resolve Qt EGL import functions.\n%1")
+                                   .arg(probeLog.join(QStringLiteral("\n"))));
         return;
     }
 
     m_eglDisplay = QtAngleEglTools::queryDisplay(context(), *m_eglApi, &probeLog);
     if (m_eglDisplay == EGL_NO_DISPLAY) {
-        emit statusMessage(QStringLiteral("D3D11 import widget failed to resolve the Qt-owned EGLDisplay.\n%1")
-                               .arg(probeLog.join(QStringLiteral("\n"))));
+        logImportWidgetMessage(QStringLiteral("D3D11 import widget failed to resolve the Qt-owned EGLDisplay.\n%1")
+                                   .arg(probeLog.join(QStringLiteral("\n"))));
         return;
     }
 
     m_eglConfig = QtAngleEglTools::queryConfig(context(), &probeLog);
-    emit statusMessage(QStringLiteral("D3D11 import widget is ready. ANGLE import bridge resolved through Qt-owned EGL runtime."));
+    logImportWidgetMessage(QStringLiteral("D3D11 import widget is ready. ANGLE import bridge resolved through Qt-owned EGL runtime."));
     emit outputSizeChanged(outputPixelSize());
     emit glInitialized();
     m_workerReadyPending = true;
@@ -164,7 +171,7 @@ void D3D11ImportWidget::paintGL()
 
     QString error;
     if (!ensureImportedSlot(m_frontFrame.slotIndex, &error)) {
-        emit statusMessage(error);
+        logImportWidgetMessage(error);
         return;
     }
 
@@ -172,9 +179,9 @@ void D3D11ImportWidget::paintGL()
     if (!slot.boundForRead) {
         const HRESULT acquireHr = slot.keyedMutex->AcquireSync(1, 5000);
         if (FAILED(acquireHr)) {
-            emit statusMessage(QStringLiteral("D3D11 import widget AcquireSync(slot %1, key 1) failed: 0x%2")
-                                   .arg(m_frontFrame.slotIndex)
-                                   .arg(static_cast<unsigned int>(acquireHr), 0, 16));
+            logImportWidgetMessage(QStringLiteral("AcquireSync(slot %1, key 1) failed: 0x%2")
+                                       .arg(m_frontFrame.slotIndex)
+                                       .arg(static_cast<unsigned int>(acquireHr), 0, 16));
             return;
         }
 
@@ -182,9 +189,9 @@ void D3D11ImportWidget::paintGL()
         if (m_eglApi->bindTexImage(m_eglDisplay, slot.surface, EGL_BACK_BUFFER) != EGL_TRUE) {
             glBindTexture(GL_TEXTURE_2D, 0);
             slot.keyedMutex->ReleaseSync(0);
-            emit statusMessage(QStringLiteral("eglBindTexImage(slot %1) failed with EGL error %2")
-                                   .arg(m_frontFrame.slotIndex)
-                                   .arg(QtAngleEglTools::eglErrorToString(m_eglApi->getError())));
+            logImportWidgetMessage(QStringLiteral("eglBindTexImage(slot %1) failed with EGL error %2")
+                                       .arg(m_frontFrame.slotIndex)
+                                       .arg(QtAngleEglTools::eglErrorToString(m_eglApi->getError())));
             return;
         }
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -235,10 +242,6 @@ void D3D11ImportWidget::notifyDisplayReadyForWorker()
 
 void D3D11ImportWidget::onFrameSwapped()
 {
-    if (m_hasFrontFrame) {
-        emit framePresented(m_frontFrame.frameIndex, m_frontFrame.size);
-    }
-
     if (m_hasRetiringFrame) {
         releaseImportedSlotReadback(m_retiringFrame.slotIndex);
         if (m_slotPool) {

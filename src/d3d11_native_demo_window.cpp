@@ -21,7 +21,18 @@
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QDebug>
 #include <QtMath>
+
+namespace
+{
+void logWindowMessage(const QString &message)
+{
+    if (!message.isEmpty()) {
+        qInfo().noquote() << "[D3D11NativeDemoWindow]" << message;
+    }
+}
+}
 
 D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -48,12 +59,6 @@ D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
     connect(m_displayWidget, &D3D11ImportWidget::outputSizeChanged,
             m_worker, &D3D11NativeWorker::setOutputSize,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &D3D11ImportWidget::statusMessage,
-            this, &D3D11NativeDemoWindow::onWorkerStatus,
-            Qt::QueuedConnection);
-    connect(m_displayWidget, &D3D11ImportWidget::framePresented,
-            this, &D3D11NativeDemoWindow::onFramePresented,
-            Qt::QueuedConnection);
 
     connect(m_worker, &D3D11NativeWorker::frameReady,
             m_displayWidget, &D3D11ImportWidget::onFrameReady,
@@ -61,17 +66,11 @@ D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
     connect(m_worker, &D3D11NativeWorker::initializationFailed,
             this, &D3D11NativeDemoWindow::onWorkerError,
             Qt::QueuedConnection);
-    connect(m_worker, &D3D11NativeWorker::statusMessage,
-            this, &D3D11NativeDemoWindow::onWorkerStatus,
-            Qt::QueuedConnection);
     connect(m_worker, &D3D11NativeWorker::imageDirectoryLoadFinished,
             this, &D3D11NativeDemoWindow::onImageDirectoryLoadFinished,
             Qt::QueuedConnection);
     connect(m_worker, &D3D11NativeWorker::imageSelectionChanged,
             this, &D3D11NativeDemoWindow::onImageSelectionChanged,
-            Qt::QueuedConnection);
-    connect(m_worker, &D3D11NativeWorker::renderTimingUpdated,
-            this, &D3D11NativeDemoWindow::onRenderTimingUpdated,
             Qt::QueuedConnection);
 
     m_workerThread.start();
@@ -79,7 +78,7 @@ D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
     setupActions();
     setupImageEffectControls();
     updateImageActions();
-    updateStatusBarMessage(QStringLiteral("Waiting for D3D11 import widget initialization..."));
+    updateStatusBarMessage();
 }
 
 D3D11NativeDemoWindow::~D3D11NativeDemoWindow()
@@ -95,7 +94,7 @@ D3D11NativeDemoWindow::~D3D11NativeDemoWindow()
 
 void D3D11NativeDemoWindow::onDisplayGlInitialized()
 {
-    updateStatusBarMessage(QStringLiteral("Display import widget is ready. Waiting for the first frame swap before starting the D3D11 worker..."));
+    logWindowMessage(QStringLiteral("Display import widget is ready. Waiting for the first frame swap before starting the D3D11 worker."));
 }
 
 void D3D11NativeDemoWindow::onDisplayReadyForWorker()
@@ -116,7 +115,7 @@ void D3D11NativeDemoWindow::onDisplayReadyForWorker()
         Q_ARG(QSize, m_displayWidget->outputPixelSize()));
     initialized = invoked && initialized;
     if (!initialized) {
-        updateStatusBarMessage(QStringLiteral("D3D11 native worker initialization failed."));
+        logWindowMessage(QStringLiteral("D3D11 native worker initialization failed."));
         return;
     }
 
@@ -124,7 +123,8 @@ void D3D11NativeDemoWindow::onDisplayReadyForWorker()
     pushEffectParameters();
     requestRender();
     updateImageActions();
-    updateStatusBarMessage(QStringLiteral("D3D11 native worker is ready. Import an image directory to start the demo."));
+    logWindowMessage(QStringLiteral("D3D11 native worker is ready. Import an image directory to start the demo."));
+    updateStatusBarMessage();
 }
 
 void D3D11NativeDemoWindow::openImageDirectory()
@@ -148,7 +148,7 @@ void D3D11NativeDemoWindow::openImageDirectory()
         "loadImageDirectory",
         Qt::QueuedConnection,
         Q_ARG(QString, directoryPath));
-    updateStatusBarMessage(QStringLiteral("Loading image directory into D3D11 worker..."));
+    logWindowMessage(QStringLiteral("Loading image directory into D3D11 worker: %1").arg(directoryPath));
 }
 
 void D3D11NativeDemoWindow::showNextImage()
@@ -195,7 +195,8 @@ void D3D11NativeDemoWindow::onImageDirectoryLoadFinished(bool loaded,
                                                          const QString &errorMessage,
                                                          int currentIndex,
                                                          int count,
-                                                         const QString &displayName)
+                                                         const QString &displayName,
+                                                         QSize imageSize)
 {
     if (!loaded) {
         QMessageBox::warning(this,
@@ -206,51 +207,35 @@ void D3D11NativeDemoWindow::onImageDirectoryLoadFinished(bool loaded,
         m_currentImageIndex = -1;
         m_imageCount = 0;
         m_currentImageName.clear();
+        m_currentImageSize = QSize();
         updateImageActions();
-        updateStatusBarMessage(QStringLiteral("Image directory loading failed."));
+        logWindowMessage(QStringLiteral("Image directory loading failed."));
+        updateStatusBarMessage();
         return;
     }
 
     m_currentImageIndex = currentIndex;
     m_imageCount = count;
     m_currentImageName = displayName;
+    m_currentImageSize = imageSize;
     updateImageActions();
     updateStatusBarMessage();
 }
 
-void D3D11NativeDemoWindow::onImageSelectionChanged(int currentIndex, int count, const QString &displayName)
+void D3D11NativeDemoWindow::onImageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize)
 {
     m_currentImageIndex = currentIndex;
     m_imageCount = count;
     m_currentImageName = displayName;
+    m_currentImageSize = imageSize;
     updateImageActions();
     updateStatusBarMessage();
 }
 
 void D3D11NativeDemoWindow::onWorkerError(const QString &reason)
 {
-    updateStatusBarMessage(QStringLiteral("Worker error: %1").arg(reason));
+    logWindowMessage(QStringLiteral("Worker error: %1").arg(reason));
     QMessageBox::warning(this, QStringLiteral("Worker Error"), reason);
-}
-
-void D3D11NativeDemoWindow::onWorkerStatus(const QString &message)
-{
-    if (!message.isEmpty()) {
-        updateStatusBarMessage(message);
-    }
-}
-
-void D3D11NativeDemoWindow::onRenderTimingUpdated(double elapsedMs)
-{
-    m_lastRenderElapsedMs = elapsedMs;
-    updateStatusBarMessage();
-}
-
-void D3D11NativeDemoWindow::onFramePresented(quint64 frameIndex, QSize size)
-{
-    Q_UNUSED(frameIndex);
-    m_lastPresentedSize = size;
-    updateStatusBarMessage();
 }
 
 void D3D11NativeDemoWindow::setupActions()
@@ -384,31 +369,16 @@ void D3D11NativeDemoWindow::setImageEffectControlsFromState()
     m_heavyGpuValueLabel->setText(QStringLiteral("%1 loops").arg(m_effectParameters.heavyGpuPassCount));
 }
 
-void D3D11NativeDemoWindow::updateStatusBarMessage(const QString &message)
+void D3D11NativeDemoWindow::updateStatusBarMessage()
 {
-    if (!message.isEmpty()) {
-        statusBar()->showMessage(message);
-        return;
-    }
-
-    if (!m_workerInitialized) {
-        statusBar()->showMessage(QStringLiteral("Waiting for D3D11 native worker initialization..."));
-        return;
-    }
-
-    if (m_imageCount <= 0) {
-        statusBar()->showMessage(QStringLiteral("D3D11 native worker is ready. Import an image directory to start the demo."));
-        return;
-    }
-
-    statusBar()->showMessage(QStringLiteral("%1 / %2  %3  Output:%4x%5  Worker:%6 ms  Stress:%7 loops")
-        .arg(m_currentImageIndex + 1)
-        .arg(m_imageCount)
-        .arg(m_currentImageName)
-        .arg(m_lastPresentedSize.isValid() ? m_lastPresentedSize.width() : m_displayWidget->outputPixelSize().width())
-        .arg(m_lastPresentedSize.isValid() ? m_lastPresentedSize.height() : m_displayWidget->outputPixelSize().height())
-        .arg(QString::number(m_lastRenderElapsedMs, 'f', 1))
-        .arg(m_effectParameters.heavyGpuPassCount));
+    const QString indexText = QString::number(m_currentImageIndex);
+    const QString countText = QString::number(m_imageCount);
+    const QString nameText = m_currentImageName.isEmpty() ? QStringLiteral("-") : m_currentImageName;
+    const QString sizeText = m_currentImageSize.isValid()
+        ? QStringLiteral("%1x%2").arg(m_currentImageSize.width()).arg(m_currentImageSize.height())
+        : QStringLiteral("-");
+    statusBar()->showMessage(QStringLiteral("m_currentImageIndex=%1  m_imageCount=%2  m_currentImageName=%3  imageSize=%4")
+                                 .arg(indexText, countText, nameText, sizeText));
 }
 
 void D3D11NativeDemoWindow::updateImageActions()

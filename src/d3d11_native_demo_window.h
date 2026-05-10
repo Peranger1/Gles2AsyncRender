@@ -3,6 +3,7 @@
 #include "image_effect_types.h"
 
 #include <QMainWindow>
+#include <QSize>
 #include <QThread>
 #include <memory>
 
@@ -36,19 +37,17 @@ private slots:
                                       const QString &errorMessage,
                                       int currentIndex,
                                       int count,
-                                      const QString &displayName);
-    void onImageSelectionChanged(int currentIndex, int count, const QString &displayName);
+                                      const QString &displayName,
+                                      QSize imageSize);
+    void onImageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize);
     void onWorkerError(const QString &reason);
-    void onWorkerStatus(const QString &message);
-    void onRenderTimingUpdated(double elapsedMs);
-    void onFramePresented(quint64 frameIndex, QSize size);
 
 private:
     void setupActions();
     void setupImageEffectControls();
     void setImageEffectControlsFromState();
     void updateImageActions();
-    void updateStatusBarMessage(const QString &message = QString());
+    void updateStatusBarMessage();
     void pushEffectParameters();
     void requestRender();
 
@@ -84,6 +83,5 @@ private:
     int m_currentImageIndex = -1;
     int m_imageCount = 0;
     QString m_currentImageName;
-    double m_lastRenderElapsedMs = 0.0;
-    QSize m_lastPresentedSize;
+    QSize m_currentImageSize;
 };

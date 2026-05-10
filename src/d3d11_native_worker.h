@@ -30,14 +30,13 @@ public slots:
 signals:
     void frameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex);
     void initializationFailed(const QString &reason);
-    void statusMessage(const QString &message);
     void imageDirectoryLoadFinished(bool loaded,
                                     const QString &errorMessage,
                                     int currentIndex,
                                     int count,
-                                    const QString &displayName);
-    void imageSelectionChanged(int currentIndex, int count, const QString &displayName);
-    void renderTimingUpdated(double elapsedMs);
+                                    const QString &displayName,
+                                    QSize imageSize);
+    void imageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize);
 
 private:
     struct Impl;
