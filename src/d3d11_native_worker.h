@@ -57,6 +57,7 @@ private:
     QSize m_outputSize;
     bool m_initialized = false;
     bool m_renderScheduled = false;
+    bool m_shuttingDown = false;
     quint64 m_frameIndex = 0;
     mutable QMutex m_stateMutex;
 };

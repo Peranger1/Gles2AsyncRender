@@ -80,4 +80,5 @@ private:
     D3D11NativeFrame m_retiringFrame;
     bool m_hasRetiringFrame = false;
     bool m_workerReadyPending = false;
+    bool m_shuttingDown = false;
 };

@@ -1,9 +1,15 @@
 #include "qt_angle_egl_tools.h"
 
 #include <QGuiApplication>
+#include <QOpenGLFunctions>
 #include <qpa/qplatformnativeinterface.h>
 
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+
+using Microsoft::WRL::ComPtr;
 
 namespace QtAngleEglTools
 {
@@ -74,6 +80,32 @@ HMODULE chooseQtEglModule(QPlatformNativeInterface *native, QStringList *probeLo
         return eglDebugModule;
     }
     return eglReleaseModule;
+}
+
+QString adapterLuidString(ID3D11Device *device)
+{
+    if (device == nullptr) {
+        return {};
+    }
+
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice) {
+        return {};
+    }
+
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) {
+        return {};
+    }
+
+    DXGI_ADAPTER_DESC desc = {};
+    if (FAILED(adapter->GetDesc(&desc))) {
+        return {};
+    }
+
+    return QStringLiteral("0x%1:0x%2")
+        .arg(static_cast<quint32>(desc.AdapterLuid.HighPart), 8, 16, QLatin1Char('0'))
+        .arg(desc.AdapterLuid.LowPart, 8, 16, QLatin1Char('0'));
 }
 } // namespace
 
@@ -265,5 +297,67 @@ EGLConfig queryConfig(QOpenGLContext *context, QStringList *probeLog)
                              .arg(QString::fromLatin1(configResource), pointerToString(handle)));
     }
     return static_cast<EGLConfig>(handle);
+}
+
+RendererIdentity queryRendererIdentity(QOpenGLContext *context,
+                                       EGLDisplay display,
+                                       const ResolvedEglApi &api,
+                                       QStringList *probeLog)
+{
+    RendererIdentity identity;
+    identity.eglModule = api.module;
+    identity.eglModulePath = api.modulePath;
+    identity.eglDisplay = display;
+
+    if (display != EGL_NO_DISPLAY && api.isValid()) {
+        api.getError();
+        const char *eglVendor = api.queryString(display, EGL_VENDOR);
+        const EGLint eglVendorError = api.getError();
+        if (eglVendor != nullptr && eglVendorError == EGL_SUCCESS) {
+            identity.eglVendor = QString::fromLatin1(eglVendor);
+        }
+
+        api.getError();
+        const char *eglVersion = api.queryString(display, EGL_VERSION);
+        const EGLint eglVersionError = api.getError();
+        if (eglVersion != nullptr && eglVersionError == EGL_SUCCESS) {
+            identity.eglVersion = QString::fromLatin1(eglVersion);
+        }
+
+        if (api.queryDisplayAttrib != nullptr && api.queryDeviceAttrib != nullptr) {
+            EGLAttrib deviceAttrib = 0;
+            if (api.queryDisplayAttrib(display, EGL_DEVICE_EXT, &deviceAttrib) && deviceAttrib != 0) {
+                identity.eglDevice = reinterpret_cast<EGLDeviceEXT>(deviceAttrib);
+                if (probeLog) {
+                    probeLog->append(QStringLiteral("eglQueryDisplayAttribEXT(EGL_DEVICE_EXT) -> %1")
+                                         .arg(pointerToString(reinterpret_cast<const void *>(identity.eglDevice))));
+                }
+
+                EGLAttrib d3d11DeviceAttrib = 0;
+                if (api.queryDeviceAttrib(identity.eglDevice, EGL_D3D11_DEVICE_ANGLE, &d3d11DeviceAttrib)
+                    && d3d11DeviceAttrib != 0) {
+                    identity.d3d11Device = reinterpret_cast<ID3D11Device *>(d3d11DeviceAttrib);
+                    identity.adapterLuid = adapterLuidString(identity.d3d11Device);
+                    if (probeLog) {
+                        probeLog->append(QStringLiteral("eglQueryDeviceAttribEXT(EGL_D3D11_DEVICE_ANGLE) -> %1 LUID=%2")
+                                             .arg(pointerToString(identity.d3d11Device), identity.adapterLuid));
+                    }
+                }
+            }
+        }
+    }
+
+    if (context != nullptr && QOpenGLContext::currentContext() == context) {
+        if (QOpenGLFunctions *functions = context->functions()) {
+            const GLubyte *glVendor = functions->glGetString(GL_VENDOR);
+            const GLubyte *glRenderer = functions->glGetString(GL_RENDERER);
+            const GLubyte *glVersion = functions->glGetString(GL_VERSION);
+            identity.glVendor = glVendor ? QString::fromLatin1(reinterpret_cast<const char *>(glVendor)) : QString();
+            identity.glRenderer = glRenderer ? QString::fromLatin1(reinterpret_cast<const char *>(glRenderer)) : QString();
+            identity.glVersion = glVersion ? QString::fromLatin1(reinterpret_cast<const char *>(glVersion)) : QString();
+        }
+    }
+
+    return identity;
 }
 } // namespace QtAngleEglTools

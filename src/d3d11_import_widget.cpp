@@ -2,8 +2,7 @@
 
 #include "angle_threading.h"
 #include "qt_angle_egl_tools.h"
-
-#include <QDebug>
+#include "runtime_diagnostics.h"
 
 #include <QtANGLE/EGL/eglext.h>
 
@@ -58,9 +57,12 @@ std::array<GLfloat, 8> aspectFitVertices(const QSize &contentSize, const QSize &
 
 void logImportWidgetMessage(const QString &message)
 {
-    if (!message.isEmpty()) {
-        qInfo().noquote() << "[D3D11ImportWidget]" << message;
-    }
+    RuntimeDiagnostics::logInfo("[D3D11ImportWidget]", message);
+}
+
+void logImportWidgetDiag(const QString &message)
+{
+    RuntimeDiagnostics::logDiag("[D3D11ImportWidget]", message);
 }
 }
 
@@ -74,6 +76,13 @@ D3D11ImportWidget::D3D11ImportWidget(QWidget *parent)
 
 D3D11ImportWidget::~D3D11ImportWidget()
 {
+    m_shuttingDown = true;
+    disconnect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::notifyDisplayReadyForWorker);
+    disconnect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::onFrameSwapped);
+    logImportWidgetDiag(QStringLiteral("Destructor begin hasFrontFrame=%1 hasPendingFrame=%2 hasRetiringFrame=%3")
+                            .arg(m_hasFrontFrame)
+                            .arg(m_hasPendingFrame)
+                            .arg(m_hasRetiringFrame));
     if (context()) {
         makeCurrent();
         for (int i = 0; i < m_importedSlots.size(); ++i) {
@@ -81,6 +90,7 @@ D3D11ImportWidget::~D3D11ImportWidget()
         }
         doneCurrent();
     }
+    logImportWidgetDiag(QStringLiteral("Destructor end"));
 }
 
 void D3D11ImportWidget::setSlotPool(const std::shared_ptr<D3D11NativeSlotPool> &slotPool)
@@ -127,7 +137,30 @@ void D3D11ImportWidget::initializeGL()
     }
 
     m_eglConfig = QtAngleEglTools::queryConfig(context(), &probeLog);
-    logImportWidgetMessage(QStringLiteral("D3D11 import widget is ready. ANGLE import bridge resolved through Qt-owned EGL runtime."));
+    const QtAngleEglTools::RendererIdentity identity =
+        QtAngleEglTools::queryRendererIdentity(context(), m_eglDisplay, *m_eglApi, &probeLog);
+    logImportWidgetMessage(QStringLiteral(
+                               "D3D11 import widget is ready. UI runtime identity:\n"
+                               "  EGL module=%1 (%2)\n"
+                               "  EGLDisplay=%3\n"
+                               "  EGLDevice=%4\n"
+                               "  D3D11Device=%5\n"
+                               "  AdapterLuid=%6\n"
+                               "  EGL vendor=%7 version=%8\n"
+                               "  GL vendor=%9 renderer=%10 version=%11\n"
+                               "%12")
+                               .arg(QtAngleEglTools::pointerToString(identity.eglModule),
+                                    identity.eglModulePath,
+                                    QtAngleEglTools::pointerToString(identity.eglDisplay),
+                                    QtAngleEglTools::pointerToString(reinterpret_cast<const void *>(identity.eglDevice)),
+                                    QtAngleEglTools::pointerToString(identity.d3d11Device),
+                                    identity.adapterLuid,
+                                    identity.eglVendor,
+                                    identity.eglVersion,
+                                    identity.glVendor,
+                                    identity.glRenderer,
+                                    identity.glVersion,
+                                    probeLog.join(QStringLiteral("\n"))));
     emit outputSizeChanged(outputPixelSize());
     emit glInitialized();
     m_workerReadyPending = true;
@@ -216,6 +249,10 @@ void D3D11ImportWidget::paintGL()
 
 void D3D11ImportWidget::onFrameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex)
 {
+    if (m_shuttingDown) {
+        return;
+    }
+
     m_pendingFrame.slotIndex = slotIndex;
     m_pendingFrame.generation = generation;
     m_pendingFrame.size = size;
@@ -232,7 +269,7 @@ void D3D11ImportWidget::onFrameReady(int slotIndex, quint64 generation, QSize si
 
 void D3D11ImportWidget::notifyDisplayReadyForWorker()
 {
-    if (!m_workerReadyPending) {
+    if (m_shuttingDown || !m_workerReadyPending) {
         return;
     }
 
@@ -242,6 +279,10 @@ void D3D11ImportWidget::notifyDisplayReadyForWorker()
 
 void D3D11ImportWidget::onFrameSwapped()
 {
+    if (m_shuttingDown) {
+        return;
+    }
+
     if (m_hasRetiringFrame) {
         releaseImportedSlotReadback(m_retiringFrame.slotIndex);
         if (m_slotPool) {

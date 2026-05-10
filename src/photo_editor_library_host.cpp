@@ -1,5 +1,6 @@
 #include "photo_editor_library_host.h"
 
+#include "angle_standalone_runtime.h"
 #include "photo_editor_gles2_simulator.h"
 
 #include <mutex>
@@ -9,26 +10,35 @@ namespace
 std::once_flag g_photoEditorInitOnce;
 bool g_photoEditorInitSucceeded = false;
 QString g_photoEditorInitError;
+AngleStandaloneRuntime *g_photoEditorRuntime = nullptr;
 } // namespace
 
-bool PhotoEditorLibraryHost::initializeOnce(QOpenGLContext *libraryContext, QString *error)
+bool PhotoEditorLibraryHost::initializeOnce(AngleStandaloneRuntime *runtime, QString *error)
 {
-    if (libraryContext == nullptr) {
+    if (runtime == nullptr) {
         if (error) {
-            *error = QStringLiteral("PhotoEditorLibraryHost requires a valid library context.");
+            *error = QStringLiteral("PhotoEditorLibraryHost requires a valid standalone runtime.");
         }
         return false;
     }
 
-    if (QOpenGLContext::currentContext() != libraryContext) {
+    if (!runtime->procTable().isValid()) {
         if (error) {
-            *error = QStringLiteral("photo_editor_init must run with the library context current.");
+            *error = QStringLiteral("PhotoEditorLibraryHost requires an initialized standalone proc table.");
         }
         return false;
     }
 
-    std::call_once(g_photoEditorInitOnce, [error]() {
+    if (g_photoEditorRuntime != nullptr && g_photoEditorRuntime != runtime) {
+        if (error) {
+            *error = QStringLiteral("photo_editor_init is already bound to a different standalone runtime.");
+        }
+        return false;
+    }
+
+    std::call_once(g_photoEditorInitOnce, [runtime, error]() {
         QString initError;
+        g_photoEditorRuntime = runtime;
         g_photoEditorInitSucceeded = photo_editor_init(&PhotoEditorLibraryHost::resolveGlProc, &initError);
         if (!g_photoEditorInitSucceeded) {
             g_photoEditorInitError = initError;
@@ -50,10 +60,9 @@ bool PhotoEditorLibraryHost::initializeOnce(QOpenGLContext *libraryContext, QStr
 
 void *PhotoEditorLibraryHost::resolveGlProc(const char *name)
 {
-    QOpenGLContext *context = QOpenGLContext::currentContext();
-    if (context == nullptr || name == nullptr) {
+    if (g_photoEditorRuntime == nullptr || name == nullptr) {
         return nullptr;
     }
 
-    return reinterpret_cast<void *>(context->getProcAddress(name));
+    return g_photoEditorRuntime->resolveProc(name);
 }

@@ -13,10 +13,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 
 add_executable(Gles2AsyncRender
-    src/angle_shared_texture_publish_bridge.cpp
-    src/angle_shared_texture_publish_bridge.h
+    src/angle_standalone_runtime.cpp
+    src/angle_standalone_runtime.h
     src/angle_threading.cpp
     src/angle_threading.h
+    src/d3d11_cpu_publish_bridge.cpp
+    src/d3d11_cpu_publish_bridge.h
     src/d3d11_import_widget.cpp
     src/d3d11_import_widget.h
     src/d3d11_native_demo_window.cpp
@@ -24,6 +26,10 @@ add_executable(Gles2AsyncRender
     src/d3d11_native_slot_pool.h
     src/d3d11_native_worker.cpp
     src/d3d11_native_worker.h
+    src/gles2_proc_table.cpp
+    src/gles2_proc_table.h
+    src/gles2_shader_utils.cpp
+    src/gles2_shader_utils.h
     src/gles_thread_guard.cpp
     src/gles_thread_guard.h
     src/image_effect_types.h
@@ -34,6 +40,8 @@ add_executable(Gles2AsyncRender
     src/photo_editor_library_host.h
     src/photo_editor_session.cpp
     src/photo_editor_session.h
+    src/runtime_diagnostics.cpp
+    src/runtime_diagnostics.h
     src/qt_angle_egl_tools.cpp
     src/qt_angle_egl_tools.h
 )

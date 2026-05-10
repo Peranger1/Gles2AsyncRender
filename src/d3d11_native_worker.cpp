@@ -1,32 +1,34 @@
 #include "d3d11_native_worker.h"
 
-#include "angle_shared_texture_publish_bridge.h"
+#include "angle_standalone_runtime.h"
+#include "d3d11_cpu_publish_bridge.h"
 #include "d3d11_native_slot_pool.h"
 #include "photo_editor_gles2_simulator.h"
 #include "photo_editor_library_host.h"
 #include "photo_editor_session.h"
+#include "runtime_diagnostics.h"
 
+#include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
 #include <QMetaObject>
 #include <QMutexLocker>
-#include <QOffscreenSurface>
-#include <QOpenGLContext>
-#include <QSurfaceFormat>
 #include <QThread>
 #include <QTimer>
 #include <QVector>
-#include <QDebug>
 
 namespace
 {
 void logWorkerMessage(const QString &message)
 {
-    if (!message.isEmpty()) {
-        qInfo().noquote() << "[D3D11NativeWorker]" << message;
-    }
+    RuntimeDiagnostics::logInfo("[D3D11NativeWorker]", message);
+}
+
+void logWorkerDiag(const QString &message)
+{
+    RuntimeDiagnostics::logDiag("[D3D11NativeWorker]", message);
 }
 
 QString formatParameters(const ImageEffectParameters &parameters)
@@ -62,15 +64,13 @@ void processProgressThunk(int progress, bool isEnd, void *userData)
         Q_ARG(int, progress),
         Q_ARG(bool, isEnd));
 }
-} // namespace
+}
 
 struct D3D11NativeWorker::Impl final
 {
-    QSurfaceFormat glFormat;
-    std::unique_ptr<QOffscreenSurface> librarySurface;
-    std::unique_ptr<QOpenGLContext> libraryContext;
+    std::unique_ptr<AngleStandaloneRuntime> algorithmRuntime;
     PhotoEditorLibraryHost libraryHost;
-    AngleSharedTexturePublishBridge publishBridge;
+    D3D11CpuPublishBridge publishBridge;
     PhotoEditorSession session;
 
     QStringList imagePaths;
@@ -118,40 +118,43 @@ struct D3D11NativeWorker::Impl final
     bool initialize(D3D11NativeSlotPool *slotPool, const QSize &outputSize, QString *error)
     {
         Q_UNUSED(outputSize);
-        glFormat = QSurfaceFormat::defaultFormat();
 
-        librarySurface = std::make_unique<QOffscreenSurface>();
-        librarySurface->setFormat(glFormat);
-        librarySurface->create();
-        if (!librarySurface->isValid()) {
-            if (error) {
-                *error = QStringLiteral("The algorithm library offscreen surface is invalid.");
-            }
+        algorithmRuntime = std::make_unique<AngleStandaloneRuntime>();
+        if (!algorithmRuntime->initialize(error)) {
+            return false;
+        }
+        if (!algorithmRuntime->makeCurrent(error)) {
             return false;
         }
 
-        libraryContext = std::make_unique<QOpenGLContext>();
-        libraryContext->setFormat(glFormat);
-        if (!libraryContext->create()) {
-            if (error) {
-                *error = QStringLiteral("The algorithm library OpenGL context could not be created.");
-            }
-            return false;
-        }
-
-        if (!libraryContext->makeCurrent(librarySurface.get())) {
-            if (error) {
-                *error = QStringLiteral("The algorithm library OpenGL context could not be made current.");
-            }
-            return false;
-        }
-
-        const bool initialized = libraryHost.initializeOnce(libraryContext.get(), error)
-            && publishBridge.initialize(libraryContext.get(), slotPool, error);
-        libraryContext->doneCurrent();
+        const bool initialized = libraryHost.initializeOnce(algorithmRuntime.get(), error)
+            && publishBridge.initialize(algorithmRuntime.get(), slotPool, error);
+        algorithmRuntime->doneCurrent(nullptr);
         if (!initialized) {
             return false;
         }
+
+        const AngleStandaloneRuntime::RendererIdentity identity = algorithmRuntime->queryRendererIdentity();
+        logWorkerMessage(QStringLiteral(
+                             "Worker standalone runtime ready.\n"
+                             "  EGL module=%1 (%2)\n"
+                             "  GLES module=%3 (%4)\n"
+                             "  EGLDisplay=%5\n"
+                             "  EGLDevice=%6\n"
+                             "  D3D11Device=%7\n"
+                             "  AdapterLuid=%8\n"
+                             "  GL vendor=%9 renderer=%10 version=%11")
+                             .arg(quintptr(identity.eglModule), 0, 16)
+                             .arg(identity.eglModulePath)
+                             .arg(quintptr(identity.glesModule), 0, 16)
+                             .arg(identity.glesModulePath)
+                             .arg(quintptr(identity.eglDisplay), 0, 16)
+                             .arg(quintptr(identity.eglDevice), 0, 16)
+                             .arg(quintptr(identity.d3d11Device), 0, 16)
+                             .arg(identity.adapterLuid)
+                             .arg(identity.glVendor)
+                             .arg(identity.glRenderer)
+                             .arg(identity.glVersion));
 
         session.reset();
         session.latestParameters = {};
@@ -167,11 +170,10 @@ struct D3D11NativeWorker::Impl final
             return;
         }
 
-        const bool hasGlTarget = libraryContext && librarySurface;
-        const bool madeCurrent = hasGlTarget && libraryContext->makeCurrent(librarySurface.get());
+        const bool madeCurrent = algorithmRuntime && algorithmRuntime->makeCurrent(nullptr);
         photo_editor_destroy(session.handle);
         if (madeCurrent) {
-            libraryContext->doneCurrent();
+            algorithmRuntime->doneCurrent(nullptr);
         }
         session.reset();
     }
@@ -182,16 +184,16 @@ struct D3D11NativeWorker::Impl final
         if (currentImage.isNull()) {
             return true;
         }
-        if (!libraryContext || !librarySurface) {
+        if (!algorithmRuntime) {
             if (error) {
-                *error = QStringLiteral("The algorithm library context is not initialized.");
+                *error = QStringLiteral("The standalone algorithm runtime is not initialized.");
             }
             return false;
         }
 
-        if (!libraryContext->makeCurrent(librarySurface.get())) {
-            if (error) {
-                *error = QStringLiteral("The algorithm library context could not be made current for session creation.");
+        if (!algorithmRuntime->makeCurrent(error)) {
+            if (error && error->isEmpty()) {
+                *error = QStringLiteral("The standalone algorithm runtime could not be made current for session creation.");
             }
             return false;
         }
@@ -201,13 +203,11 @@ struct D3D11NativeWorker::Impl final
         if (ok) {
             ok = photo_editor_set_output_size(session.handle, sanitizedSize(outputSize), error);
         }
-        libraryContext->doneCurrent();
+        algorithmRuntime->doneCurrent(nullptr);
         if (!ok) {
-            if (session.handle != nullptr) {
-                if (libraryContext->makeCurrent(librarySurface.get())) {
-                    photo_editor_destroy(session.handle);
-                    libraryContext->doneCurrent();
-                }
+            if (session.handle != nullptr && algorithmRuntime->makeCurrent(nullptr)) {
+                photo_editor_destroy(session.handle);
+                algorithmRuntime->doneCurrent(nullptr);
             }
             session.reset();
             return false;
@@ -267,19 +267,19 @@ struct D3D11NativeWorker::Impl final
 
     bool updateOutputSize(const QSize &outputSize, QString *error)
     {
-        if (session.handle == nullptr || !libraryContext || !librarySurface) {
+        if (session.handle == nullptr || !algorithmRuntime) {
             return true;
         }
 
-        if (!libraryContext->makeCurrent(librarySurface.get())) {
-            if (error) {
-                *error = QStringLiteral("The algorithm library context could not be made current for resize.");
+        if (!algorithmRuntime->makeCurrent(error)) {
+            if (error && error->isEmpty()) {
+                *error = QStringLiteral("The standalone algorithm runtime could not be made current for resize.");
             }
             return false;
         }
 
         const bool ok = photo_editor_set_output_size(session.handle, sanitizedSize(outputSize), error);
-        libraryContext->doneCurrent();
+        algorithmRuntime->doneCurrent(nullptr);
         return ok;
     }
 
@@ -301,22 +301,22 @@ struct D3D11NativeWorker::Impl final
             }
             return false;
         }
-        if (!libraryContext || !librarySurface) {
+        if (!algorithmRuntime) {
             if (error) {
-                *error = QStringLiteral("The algorithm library context is not initialized.");
+                *error = QStringLiteral("The standalone algorithm runtime is not initialized.");
             }
             return false;
         }
 
-        if (!libraryContext->makeCurrent(librarySurface.get())) {
-            if (error) {
-                *error = QStringLiteral("The algorithm library context could not be made current for process start.");
+        if (!algorithmRuntime->makeCurrent(error)) {
+            if (error && error->isEmpty()) {
+                *error = QStringLiteral("The standalone algorithm runtime could not be made current for process start.");
             }
             return false;
         }
 
-        logWorkerMessage(QStringLiteral("[diag] startProcess begin ctx=%1 thread=%2 imageIndex=%3 output=%4x%5 %6")
-                             .arg(reinterpret_cast<quintptr>(libraryContext.get()), 0, 16)
+        logWorkerDiag(QStringLiteral("[diag] startProcess begin runtimeD3D=%1 thread=%2 imageIndex=%3 output=%4x%5 %6")
+                             .arg(reinterpret_cast<quintptr>(algorithmRuntime->d3d11Device()), 0, 16)
                              .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
                              .arg(currentImageIndex)
                              .arg(outputSize.width())
@@ -334,19 +334,19 @@ struct D3D11NativeWorker::Impl final
                                       callbackUserData,
                                       error);
         }
-        libraryContext->doneCurrent();
+        algorithmRuntime->doneCurrent(nullptr);
 
         if (ok) {
             session.processingParameters = parameters;
             session.processInFlight = true;
             session.renderReady = false;
             session.latestProgress = 0;
-            logWorkerMessage(QStringLiteral("[diag] startProcess queued ctx=%1 processInFlight=%2 renderReady=%3")
-                                 .arg(reinterpret_cast<quintptr>(libraryContext.get()), 0, 16)
+            logWorkerDiag(QStringLiteral("[diag] startProcess queued runtimeD3D=%1 processInFlight=%2 renderReady=%3")
+                                 .arg(reinterpret_cast<quintptr>(algorithmRuntime->d3d11Device()), 0, 16)
                                  .arg(session.processInFlight)
                                  .arg(session.renderReady));
         } else {
-            logWorkerMessage(QStringLiteral("[diag] startProcess failed error=%1")
+            logWorkerDiag(QStringLiteral("[diag] startProcess failed error=%1")
                                  .arg(error ? *error : QString()));
         }
         return ok;
@@ -372,28 +372,28 @@ struct D3D11NativeWorker::Impl final
 
         publishActive = true;
 
-        if (!libraryContext || !librarySurface) {
+        if (!algorithmRuntime) {
             slotPool->abandonRenderSlot(renderSlot);
             publishActive = false;
             if (error) {
-                *error = QStringLiteral("The algorithm library context is not initialized.");
+                *error = QStringLiteral("The standalone algorithm runtime is not initialized.");
             }
             return false;
         }
 
-        if (!libraryContext->makeCurrent(librarySurface.get())) {
+        if (!algorithmRuntime->makeCurrent(error)) {
             slotPool->abandonRenderSlot(renderSlot);
             publishActive = false;
-            if (error) {
-                *error = QStringLiteral("The algorithm library context could not be made current for render.");
+            if (error && error->isEmpty()) {
+                *error = QStringLiteral("The standalone algorithm runtime could not be made current for render.");
             }
             return false;
         }
 
-        logWorkerMessage(QStringLiteral("[diag] renderAndPublish begin frame=%1 slot=%2 ctx=%3 thread=%4 renderReady=%5 latestProgress=%6 output=%7x%8")
+        logWorkerDiag(QStringLiteral("[diag] renderAndPublish begin frame=%1 slot=%2 runtimeD3D=%3 thread=%4 renderReady=%5 latestProgress=%6 output=%7x%8")
                              .arg(frameIndex)
                              .arg(renderSlot)
-                             .arg(reinterpret_cast<quintptr>(libraryContext.get()), 0, 16)
+                             .arg(reinterpret_cast<quintptr>(algorithmRuntime->d3d11Device()), 0, 16)
                              .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
                              .arg(session.renderReady)
                              .arg(session.latestProgress)
@@ -405,7 +405,7 @@ struct D3D11NativeWorker::Impl final
         QSize textureSize;
         if (ok) {
             ok = photo_editor_render(session.handle, &textureId, &textureSize, error);
-            logWorkerMessage(QStringLiteral("[diag] photo_editor_render result ok=%1 textureId=%2 size=%3x%4 error=%5")
+            logWorkerDiag(QStringLiteral("[diag] photo_editor_render result ok=%1 textureId=%2 size=%3x%4 error=%5")
                                  .arg(ok)
                                  .arg(textureId)
                                  .arg(textureSize.width())
@@ -413,20 +413,20 @@ struct D3D11NativeWorker::Impl final
                                  .arg(error ? *error : QString()));
         }
         if (ok) {
-            logWorkerMessage(QStringLiteral("[diag] publishToSlot begin frame=%1 slot=%2 textureId=%3 size=%4x%5")
+            logWorkerDiag(QStringLiteral("[diag] publishToSlot begin frame=%1 slot=%2 textureId=%3 size=%4x%5")
                                  .arg(frameIndex)
                                  .arg(renderSlot)
                                  .arg(textureId)
                                  .arg(textureSize.width())
                                  .arg(textureSize.height()));
             ok = publishBridge.publishToSlot(textureId, textureSize, renderSlot, error);
-            logWorkerMessage(QStringLiteral("[diag] publishToSlot end frame=%1 slot=%2 ok=%3 error=%4")
+            logWorkerDiag(QStringLiteral("[diag] publishToSlot end frame=%1 slot=%2 ok=%3 error=%4")
                                  .arg(frameIndex)
                                  .arg(renderSlot)
                                  .arg(ok)
                                  .arg(error ? *error : QString()));
         }
-        libraryContext->doneCurrent();
+        algorithmRuntime->doneCurrent(nullptr);
 
         if (!ok) {
             slotPool->abandonRenderSlot(renderSlot);
@@ -444,6 +444,24 @@ struct D3D11NativeWorker::Impl final
         session.latestProgress = 100;
         publishActive = false;
         return true;
+    }
+
+    void shutdownRuntime()
+    {
+        if (!algorithmRuntime) {
+            return;
+        }
+
+        logWorkerDiag(QStringLiteral("[diag] shutdownRuntime begin hasSession=%1 publishActive=%2")
+                             .arg(session.handle != nullptr)
+                             .arg(publishActive));
+        if (algorithmRuntime->makeCurrent(nullptr)) {
+            publishBridge.releaseGlResources();
+            algorithmRuntime->doneCurrent(nullptr);
+        }
+        algorithmRuntime->shutdown();
+        algorithmRuntime.reset();
+        logWorkerDiag(QStringLiteral("[diag] shutdownRuntime end"));
     }
 };
 
@@ -476,12 +494,17 @@ bool D3D11NativeWorker::initialize(D3D11NativeSlotPool *slotPool, QSize outputSi
 
     m_slotPool->reset();
     m_initialized = true;
-    logWorkerMessage(QStringLiteral("Initialized. Worker now uses a non-shared GLES2 algorithm context plus a publish bridge to shared D3D11 textures."));
+    m_shuttingDown = false;
+    logWorkerMessage(QStringLiteral("Initialized. Worker now uses a standalone ANGLE runtime and a CPU publish bridge to shared D3D11 textures."));
     return true;
 }
 
 void D3D11NativeWorker::setOutputSize(QSize size)
 {
+    if (m_shuttingDown) {
+        return;
+    }
+
     const QSize safeSize = sanitizedSize(size);
     bool changed = false;
     {
@@ -507,6 +530,10 @@ void D3D11NativeWorker::setOutputSize(QSize size)
 
 void D3D11NativeWorker::setEffectParameters(const ImageEffectParameters &parameters)
 {
+    if (m_shuttingDown) {
+        return;
+    }
+
     {
         QMutexLocker locker(&m_stateMutex);
         m_effectParameters = parameters;
@@ -524,6 +551,10 @@ void D3D11NativeWorker::setEffectParameters(const ImageEffectParameters &paramet
 
 void D3D11NativeWorker::loadImageDirectory(const QString &directoryPath)
 {
+    if (m_shuttingDown) {
+        return;
+    }
+
     if (!m_initialized) {
         emit imageDirectoryLoadFinished(false,
                                         QStringLiteral("D3D11 native worker is not initialized."),
@@ -565,7 +596,7 @@ void D3D11NativeWorker::loadImageDirectory(const QString &directoryPath)
 
 void D3D11NativeWorker::selectNextImage()
 {
-    if (!m_initialized) {
+    if (!m_initialized || m_shuttingDown) {
         return;
     }
 
@@ -587,7 +618,7 @@ void D3D11NativeWorker::selectNextImage()
 
 void D3D11NativeWorker::selectPreviousImage()
 {
-    if (!m_initialized) {
+    if (!m_initialized || m_shuttingDown) {
         return;
     }
 
@@ -614,11 +645,16 @@ void D3D11NativeWorker::requestRender()
         m_renderScheduled = false;
     }
 
+    if (m_shuttingDown || (m_impl && m_impl->shutdownRequested)) {
+        logWorkerDiag(QStringLiteral("[diag] requestRender skipped because shutdown is in progress"));
+        return;
+    }
+
     if (!m_initialized || m_slotPool == nullptr || !m_impl->hasImage()) {
         return;
     }
 
-    logWorkerMessage(QStringLiteral("[diag] requestRender enter processInFlight=%1 renderReady=%2 publishActive=%3 frameIndex=%4 imageIndex=%5")
+    logWorkerDiag(QStringLiteral("[diag] requestRender enter processInFlight=%1 renderReady=%2 publishActive=%3 frameIndex=%4 imageIndex=%5")
                          .arg(m_impl->session.processInFlight)
                          .arg(m_impl->session.renderReady)
                          .arg(m_impl->publishActive)
@@ -678,6 +714,14 @@ void D3D11NativeWorker::requestRender()
 
 void D3D11NativeWorker::shutdown()
 {
+    if (m_shuttingDown) {
+        return;
+    }
+
+    m_shuttingDown = true;
+    logWorkerDiag(QStringLiteral("[diag] shutdown begin initialized=%1 frameIndex=%2")
+                         .arg(m_initialized)
+                         .arg(m_frameIndex));
     m_initialized = false;
     m_renderScheduled = false;
     m_frameIndex = 0;
@@ -685,10 +729,12 @@ void D3D11NativeWorker::shutdown()
     if (m_impl) {
         m_impl->shutdownRequested = true;
         m_impl->destroySession();
+        m_impl->shutdownRuntime();
     }
 
     m_slotPool = nullptr;
     m_impl = std::make_unique<Impl>();
+    logWorkerDiag(QStringLiteral("[diag] shutdown end"));
 }
 
 void D3D11NativeWorker::emitImageSelection()
@@ -719,7 +765,7 @@ ImageEffectParameters D3D11NativeWorker::currentEffectParameters() const
 void D3D11NativeWorker::scheduleRender(int delayMs)
 {
     QMutexLocker locker(&m_stateMutex);
-    if (m_renderScheduled) {
+    if (m_renderScheduled || m_shuttingDown || (m_impl && m_impl->shutdownRequested)) {
         return;
     }
 
@@ -729,11 +775,14 @@ void D3D11NativeWorker::scheduleRender(int delayMs)
 
 void D3D11NativeWorker::onProcessProgressEvent(int progress, bool isEnd)
 {
-    if (!m_initialized || m_impl->shutdownRequested) {
+    if (!m_initialized || m_shuttingDown || m_impl->shutdownRequested) {
+        logWorkerDiag(QStringLiteral("[diag] onProcessProgressEvent ignored during shutdown progress=%1 isEnd=%2")
+                             .arg(progress)
+                             .arg(isEnd));
         return;
     }
 
-    logWorkerMessage(QStringLiteral("[diag] onProcessProgressEvent progress=%1 isEnd=%2 processInFlight(before)=%3 renderReady(before)=%4")
+    logWorkerDiag(QStringLiteral("[diag] onProcessProgressEvent progress=%1 isEnd=%2 processInFlight(before)=%3 renderReady(before)=%4")
                          .arg(progress)
                          .arg(isEnd)
                          .arg(m_impl->session.processInFlight)
@@ -748,7 +797,7 @@ void D3D11NativeWorker::onProcessProgressEvent(int progress, bool isEnd)
 
     m_impl->session.processInFlight = false;
     m_impl->session.renderReady = true;
-    logWorkerMessage(QStringLiteral("[diag] onProcessProgressEvent completed processInFlight(after)=%1 renderReady(after)=%2")
+    logWorkerDiag(QStringLiteral("[diag] onProcessProgressEvent completed processInFlight(after)=%1 renderReady(after)=%2")
                          .arg(m_impl->session.processInFlight)
                          .arg(m_impl->session.renderReady));
     scheduleRender(0);

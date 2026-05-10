@@ -1,12 +1,13 @@
 #pragma once
 
-#include <QOpenGLContext>
 #include <QString>
+
+class AngleStandaloneRuntime;
 
 class PhotoEditorLibraryHost
 {
 public:
-    bool initializeOnce(QOpenGLContext *libraryContext, QString *error);
+    bool initializeOnce(AngleStandaloneRuntime *runtime, QString *error);
 
 private:
     static void *resolveGlProc(const char *name);

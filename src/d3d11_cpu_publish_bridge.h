@@ -3,20 +3,20 @@
 #include <QSize>
 #include <QString>
 
-#include <QtGui/qopengl.h>
+#include <QtANGLE/GLES2/gl2.h>
 
 #include <memory>
 
+class AngleStandaloneRuntime;
 class D3D11NativeSlotPool;
-class QOpenGLContext;
 
-class AngleSharedTexturePublishBridge
+class D3D11CpuPublishBridge final
 {
 public:
-    AngleSharedTexturePublishBridge();
-    ~AngleSharedTexturePublishBridge();
+    D3D11CpuPublishBridge();
+    ~D3D11CpuPublishBridge();
 
-    bool initialize(QOpenGLContext *context,
+    bool initialize(AngleStandaloneRuntime *runtime,
                     D3D11NativeSlotPool *slotPool,
                     QString *error);
 
@@ -29,6 +29,5 @@ public:
 
 private:
     struct Impl;
-
     std::unique_ptr<Impl> m_impl;
 };

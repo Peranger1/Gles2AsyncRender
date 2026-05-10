@@ -410,6 +410,29 @@ worker 必须：
   - 不再触发 `DisplayImpl.cpp:24`
 - UI 与 worker 查询到的 `ID3D11Device *` 不相同
 
+### 12.1 当前第一阶段收口状态
+
+截至 2026-05-10，第一阶段收口后的当前实现约束如下：
+
+- worker 侧仅保留 `AngleStandaloneRuntime + D3D11CpuPublishBridge`
+- 仓库内不再保留旧的 `AngleSharedTexturePublishBridge` Qt-context publish 路线
+- 默认运行日志只保留初始化、错误、关键状态切换
+- 高频运行时诊断日志默认关闭
+- 如需排查运行时细节，可设置环境变量：
+  - `GLES2ASYNC_DIAG=1`
+- 关闭窗口路径已加入 shutdown 保护，避免 teardown 阶段继续接收新的 render/progress 事件
+- 对当前 Qt 5.15.1 自带 ANGLE 路径：
+  - `EGL_PLATFORM_DEVICE_EXT` 对应的 standalone runtime shutdown 中，不应显式调用 `eglReleaseDeviceANGLE`
+  - 原因是该 ANGLE 构建会在 `Display::~Display()` 中再次删除同一 `Device`
+  - 若显式 release，会触发 `libANGLE/Device.cpp` 的 double-destroy 断言
+
+建议将以下场景作为第一阶段最小回归集：
+
+- 导入图片
+- 连续拖动 brightness / contrast / zoom
+- 窗口 resize
+- 关闭窗口
+
 ## 13. 风险与注意事项
 
 ### 13.1 不能显式链接另一份 EGL/GLES

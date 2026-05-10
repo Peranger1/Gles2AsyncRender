@@ -5,8 +5,7 @@
 #include <QImage>
 #include <QSize>
 #include <QString>
-
-#include <QtGui/qopengl.h>
+#include <QtANGLE/GLES2/gl2.h>
 
 class QObject;
 

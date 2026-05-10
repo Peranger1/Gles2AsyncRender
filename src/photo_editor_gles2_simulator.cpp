@@ -1,10 +1,12 @@
 #include "photo_editor_gles2_simulator.h"
 
-#include <QOpenGLContext>
-#include <QOpenGLFunctions>
-#include <QOpenGLShaderProgram>
-#include <QPointer>
+#include "gles2_proc_table.h"
+#include "gles2_shader_utils.h"
+#include "runtime_diagnostics.h"
+
+#include <QByteArray>
 #include <QDebug>
+#include <QPointer>
 #include <QThread>
 #include <QTimer>
 #include <QtMath>
@@ -13,6 +15,9 @@
 
 namespace
 {
+Gles2ProcTable g_procTable;
+bool g_initialized = false;
+
 struct PhotoEditorHandleState final
 {
     QImage sourceImage;
@@ -31,19 +36,19 @@ struct PhotoEditorHandleState final
     GLuint framebufferId = 0;
     QSize outputTextureSize;
 
-    std::unique_ptr<QOpenGLShaderProgram> program;
-    int positionLocation = -1;
-    int texCoordLocation = -1;
-    int sourceLocation = -1;
-    int sourceSizeLocation = -1;
-    int outputSizeLocation = -1;
-    int brightnessLocation = -1;
-    int contrastLocation = -1;
-    int zoomLocation = -1;
-    int panLocation = -1;
-    int rotationLocation = -1;
-    int flipLocation = -1;
-    int heavyPassLocation = -1;
+    GLuint program = 0;
+    GLint positionLocation = -1;
+    GLint texCoordLocation = -1;
+    GLint sourceLocation = -1;
+    GLint sourceSizeLocation = -1;
+    GLint outputSizeLocation = -1;
+    GLint brightnessLocation = -1;
+    GLint contrastLocation = -1;
+    GLint zoomLocation = -1;
+    GLint panLocation = -1;
+    GLint rotationLocation = -1;
+    GLint flipLocation = -1;
+    GLint heavyPassLocation = -1;
 };
 
 struct PhotoEditorHandle final
@@ -58,9 +63,12 @@ QSize sanitizedSize(const QSize &size)
 
 void logSimulatorMessage(const QString &message)
 {
-    if (!message.isEmpty()) {
-        qInfo().noquote() << "[PhotoEditorSim]" << message;
-    }
+    RuntimeDiagnostics::logInfo("[PhotoEditorSim]", message);
+}
+
+void logSimulatorDiag(const QString &message)
+{
+    RuntimeDiagnostics::logDiag("[PhotoEditorSim]", message);
 }
 
 QString glErrorHex(GLenum error)
@@ -73,25 +81,16 @@ PhotoEditorHandle *toHandle(void *handle)
     return static_cast<PhotoEditorHandle *>(handle);
 }
 
-QOpenGLFunctions *currentFunctions(QString *error)
+bool currentProcTable(QString *error)
 {
-    QOpenGLContext *context = QOpenGLContext::currentContext();
-    if (context == nullptr) {
-        if (error) {
-            *error = QStringLiteral("The photo editor simulator requires a current OpenGL context.");
-        }
-        return nullptr;
+    if (g_initialized && g_procTable.isValid()) {
+        return true;
     }
 
-    QOpenGLFunctions *functions = context->functions();
-    if (functions == nullptr) {
-        if (error) {
-            *error = QStringLiteral("QOpenGLFunctions are unavailable for the current context.");
-        }
-        return nullptr;
+    if (error) {
+        *error = QStringLiteral("photo_editor_init must complete before using the GLES2 simulator.");
     }
-
-    return functions;
+    return false;
 }
 
 bool ensureProgram(PhotoEditorHandleState *state, QString *error)
@@ -102,12 +101,12 @@ bool ensureProgram(PhotoEditorHandleState *state, QString *error)
         }
         return false;
     }
-
-    if (state->program) {
+    if (!currentProcTable(error)) {
+        return false;
+    }
+    if (state->program != 0U) {
         return true;
     }
-
-    auto program = std::make_unique<QOpenGLShaderProgram>();
 
     static const char *kVertexShader = R"(
 attribute highp vec2 aPosition;
@@ -193,39 +192,22 @@ void main()
 }
 )";
 
-    if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, kVertexShader)) {
-        if (error) {
-            *error = program->log();
-        }
+    if (!Gles2ShaderUtils::buildProgram(g_procTable, kVertexShader, kFragmentShader, &state->program, error)) {
         return false;
     }
 
-    if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, kFragmentShader)) {
-        if (error) {
-            *error = program->log();
-        }
-        return false;
-    }
-
-    if (!program->link()) {
-        if (error) {
-            *error = program->log();
-        }
-        return false;
-    }
-
-    state->positionLocation = program->attributeLocation("aPosition");
-    state->texCoordLocation = program->attributeLocation("aTexCoord");
-    state->sourceLocation = program->uniformLocation("uSource");
-    state->sourceSizeLocation = program->uniformLocation("uSourceSize");
-    state->outputSizeLocation = program->uniformLocation("uOutputSize");
-    state->brightnessLocation = program->uniformLocation("uBrightness");
-    state->contrastLocation = program->uniformLocation("uContrast");
-    state->zoomLocation = program->uniformLocation("uZoom");
-    state->panLocation = program->uniformLocation("uPan");
-    state->rotationLocation = program->uniformLocation("uRotationRadians");
-    state->flipLocation = program->uniformLocation("uFlip");
-    state->heavyPassLocation = program->uniformLocation("uHeavyPassCount");
+    state->positionLocation = g_procTable.glGetAttribLocation(state->program, "aPosition");
+    state->texCoordLocation = g_procTable.glGetAttribLocation(state->program, "aTexCoord");
+    state->sourceLocation = g_procTable.glGetUniformLocation(state->program, "uSource");
+    state->sourceSizeLocation = g_procTable.glGetUniformLocation(state->program, "uSourceSize");
+    state->outputSizeLocation = g_procTable.glGetUniformLocation(state->program, "uOutputSize");
+    state->brightnessLocation = g_procTable.glGetUniformLocation(state->program, "uBrightness");
+    state->contrastLocation = g_procTable.glGetUniformLocation(state->program, "uContrast");
+    state->zoomLocation = g_procTable.glGetUniformLocation(state->program, "uZoom");
+    state->panLocation = g_procTable.glGetUniformLocation(state->program, "uPan");
+    state->rotationLocation = g_procTable.glGetUniformLocation(state->program, "uRotationRadians");
+    state->flipLocation = g_procTable.glGetUniformLocation(state->program, "uFlip");
+    state->heavyPassLocation = g_procTable.glGetUniformLocation(state->program, "uHeavyPassCount");
 
     if (state->positionLocation < 0
         || state->texCoordLocation < 0
@@ -242,24 +224,22 @@ void main()
         if (error) {
             *error = QStringLiteral("The simulator shader program is missing required attributes or uniforms.");
         }
+        Gles2ShaderUtils::deleteProgram(g_procTable, &state->program);
         return false;
     }
 
-    state->program = std::move(program);
     return true;
 }
 
 bool ensureSourceTexture(PhotoEditorHandleState *state, QString *error)
 {
-    QOpenGLFunctions *functions = currentFunctions(error);
-    if (functions == nullptr || state == nullptr) {
+    if (!currentProcTable(error) || state == nullptr) {
         return false;
     }
 
     if (state->sourceTextureId == 0U) {
-        functions->glGenTextures(1, &state->sourceTextureId);
+        g_procTable.glGenTextures(1, &state->sourceTextureId);
     }
-
     if (!state->sourceImageDirty) {
         return true;
     }
@@ -272,65 +252,63 @@ bool ensureSourceTexture(PhotoEditorHandleState *state, QString *error)
         return false;
     }
 
-    functions->glBindTexture(GL_TEXTURE_2D, state->sourceTextureId);
-    functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    functions->glTexImage2D(GL_TEXTURE_2D,
-                            0,
-                            GL_RGBA,
-                            image.width(),
-                            image.height(),
-                            0,
-                            GL_RGBA,
-                            GL_UNSIGNED_BYTE,
-                            image.constBits());
-    functions->glBindTexture(GL_TEXTURE_2D, 0);
-
+    g_procTable.glBindTexture(GL_TEXTURE_2D, state->sourceTextureId);
+    g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g_procTable.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    g_procTable.glTexImage2D(GL_TEXTURE_2D,
+                             0,
+                             GL_RGBA,
+                             image.width(),
+                             image.height(),
+                             0,
+                             GL_RGBA,
+                             GL_UNSIGNED_BYTE,
+                             image.constBits());
+    g_procTable.glBindTexture(GL_TEXTURE_2D, 0);
     state->sourceImageDirty = false;
     return true;
 }
 
 bool ensureOutputTarget(PhotoEditorHandleState *state, QString *error)
 {
-    QOpenGLFunctions *functions = currentFunctions(error);
-    if (functions == nullptr || state == nullptr) {
+    if (!currentProcTable(error) || state == nullptr) {
         return false;
     }
 
     const QSize targetSize = sanitizedSize(state->outputSize.isValid() ? state->outputSize : state->sourceImage.size());
-
     if (state->outputTextureId == 0U) {
-        functions->glGenTextures(1, &state->outputTextureId);
+        g_procTable.glGenTextures(1, &state->outputTextureId);
     }
     if (state->framebufferId == 0U) {
-        functions->glGenFramebuffers(1, &state->framebufferId);
+        g_procTable.glGenFramebuffers(1, &state->framebufferId);
     }
 
     if (state->outputTextureSize != targetSize) {
-        functions->glBindTexture(GL_TEXTURE_2D, state->outputTextureId);
-        functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        functions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        functions->glTexImage2D(GL_TEXTURE_2D,
-                                0,
-                                GL_RGBA,
-                                targetSize.width(),
-                                targetSize.height(),
-                                0,
-                                GL_RGBA,
-                                GL_UNSIGNED_BYTE,
-                                nullptr);
-        functions->glBindTexture(GL_TEXTURE_2D, 0);
+        g_procTable.glBindTexture(GL_TEXTURE_2D, state->outputTextureId);
+        g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        g_procTable.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        g_procTable.glTexImage2D(GL_TEXTURE_2D,
+                                 0,
+                                 GL_RGBA,
+                                 targetSize.width(),
+                                 targetSize.height(),
+                                 0,
+                                 GL_RGBA,
+                                 GL_UNSIGNED_BYTE,
+                                 nullptr);
+        g_procTable.glBindTexture(GL_TEXTURE_2D, 0);
         state->outputTextureSize = targetSize;
     }
 
-    functions->glBindFramebuffer(GL_FRAMEBUFFER, state->framebufferId);
-    functions->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state->outputTextureId, 0);
-    const GLenum status = functions->glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    functions->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    g_procTable.glBindFramebuffer(GL_FRAMEBUFFER, state->framebufferId);
+    g_procTable.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state->outputTextureId, 0);
+    const GLenum status = g_procTable.glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    g_procTable.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         if (error) {
             *error = QStringLiteral("The simulator framebuffer is incomplete: 0x%1")
@@ -344,34 +322,24 @@ bool ensureOutputTarget(PhotoEditorHandleState *state, QString *error)
 
 void releaseGlResources(PhotoEditorHandleState *state)
 {
-    if (state == nullptr) {
-        return;
-    }
-
-    QOpenGLContext *context = QOpenGLContext::currentContext();
-    if (context == nullptr) {
-        return;
-    }
-
-    QOpenGLFunctions *functions = context->functions();
-    if (functions == nullptr) {
+    if (state == nullptr || !g_initialized || !g_procTable.isValid()) {
         return;
     }
 
     if (state->framebufferId != 0U) {
-        functions->glDeleteFramebuffers(1, &state->framebufferId);
+        g_procTable.glDeleteFramebuffers(1, &state->framebufferId);
         state->framebufferId = 0U;
     }
     if (state->outputTextureId != 0U) {
-        functions->glDeleteTextures(1, &state->outputTextureId);
+        g_procTable.glDeleteTextures(1, &state->outputTextureId);
         state->outputTextureId = 0U;
     }
     if (state->sourceTextureId != 0U) {
-        functions->glDeleteTextures(1, &state->sourceTextureId);
+        g_procTable.glDeleteTextures(1, &state->sourceTextureId);
         state->sourceTextureId = 0U;
     }
-    state->outputTextureSize = QSize();
-    state->program.reset();
+    Gles2ShaderUtils::deleteProgram(g_procTable, &state->program);
+    state->outputTextureSize = {};
 }
 
 void scheduleProgressStep(const std::shared_ptr<PhotoEditorHandleState> &state,
@@ -398,7 +366,7 @@ void scheduleProgressStep(const std::shared_ptr<PhotoEditorHandleState> &state,
         }
     });
 }
-} // namespace
+}
 
 bool photo_editor_init(PhotoEditorResolveGlProc resolver, QString *error)
 {
@@ -409,25 +377,33 @@ bool photo_editor_init(PhotoEditorResolveGlProc resolver, QString *error)
         return false;
     }
 
-    if (QOpenGLContext::currentContext() == nullptr) {
+    Gles2ProcTable procTable;
+    const auto resolve = [resolver](const char *name) { return resolver(name); };
+    if (!procTable.load(resolve, error)) {
+        return false;
+    }
+    if (procTable.eglGetCurrentContext() == EGL_NO_CONTEXT) {
         if (error) {
-            *error = QStringLiteral("photo_editor_init requires a current OpenGL context.");
+            *error = QStringLiteral("photo_editor_init requires a current standalone EGL context.");
         }
         return false;
     }
-
-    if (resolver("glGetString") == nullptr) {
+    if (procTable.glGetString(GL_VENDOR) == nullptr) {
         if (error) {
             *error = QStringLiteral("The GL proc resolver could not resolve glGetString.");
         }
         return false;
     }
 
+    g_procTable = procTable;
+    g_initialized = true;
     return true;
 }
 
 void *photo_editor_create(const QImage &sourceImage, QString *error)
 {
+    Q_UNUSED(error);
+
     if (sourceImage.isNull()) {
         if (error) {
             *error = QStringLiteral("photo_editor_create requires a valid source image.");
@@ -458,6 +434,8 @@ void photo_editor_destroy(void *handle)
 
 bool photo_editor_set_output_size(void *handle, const QSize &outputSize, QString *error)
 {
+    Q_UNUSED(error);
+
     PhotoEditorHandle *photoHandle = toHandle(handle);
     if (photoHandle == nullptr || !photoHandle->state) {
         if (error) {
@@ -472,6 +450,8 @@ bool photo_editor_set_output_size(void *handle, const QSize &outputSize, QString
 
 bool photo_editor_set_opcode(void *handle, const ImageEffectParameters &parameters, QString *error)
 {
+    Q_UNUSED(error);
+
     PhotoEditorHandle *photoHandle = toHandle(handle);
     if (photoHandle == nullptr || !photoHandle->state) {
         if (error) {
@@ -542,12 +522,11 @@ bool photo_editor_render(void *handle, GLuint *textureId, QSize *size, QString *
         }
         return false;
     }
-
-    PhotoEditorHandleState *state = photoHandle->state.get();
-    QOpenGLFunctions *functions = currentFunctions(error);
-    if (functions == nullptr) {
+    if (!currentProcTable(error)) {
         return false;
     }
+
+    PhotoEditorHandleState *state = photoHandle->state.get();
     if (!ensureProgram(state, error) || !ensureSourceTexture(state, error) || !ensureOutputTarget(state, error)) {
         return false;
     }
@@ -570,8 +549,9 @@ bool photo_editor_render(void *handle, GLuint *textureId, QSize *size, QString *
     const QImage sourceImage = state->sourceImage;
     const int heavyPassCount = qBound(0, state->parameters.heavyGpuPassCount, 64);
 
-    logSimulatorMessage(QStringLiteral("[diag] render begin ctx=%1 thread=%2 sourceTex=%3 outputTex=%4 fbo=%5 target=%6x%7 brightness=%8 contrast=%9 zoom=%10 heavyPass=%11")
-                            .arg(reinterpret_cast<quintptr>(QOpenGLContext::currentContext()), 0, 16)
+    logSimulatorDiag(QStringLiteral("[diag] render begin ctx=%1 display=%2 thread=%3 sourceTex=%4 outputTex=%5 fbo=%6 target=%7x%8 brightness=%9 contrast=%10 zoom=%11 heavyPass=%12")
+                            .arg(quintptr(g_procTable.eglGetCurrentContext()), 0, 16)
+                            .arg(quintptr(g_procTable.eglGetCurrentDisplay()), 0, 16)
                             .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
                             .arg(state->sourceTextureId)
                             .arg(state->outputTextureId)
@@ -583,53 +563,47 @@ bool photo_editor_render(void *handle, GLuint *textureId, QSize *size, QString *
                             .arg(QString::number(state->parameters.zoom, 'f', 3))
                             .arg(heavyPassCount));
 
-    functions->glBindFramebuffer(GL_FRAMEBUFFER, state->framebufferId);
-    logSimulatorMessage(QStringLiteral("[diag] render after glBindFramebuffer fbo=%1 glError=%2")
-                            .arg(state->framebufferId)
-                            .arg(glErrorHex(functions->glGetError())));
-    functions->glViewport(0, 0, targetSize.width(), targetSize.height());
-    functions->glClearColor(0.05f, 0.06f, 0.08f, 1.0f);
-    functions->glClear(GL_COLOR_BUFFER_BIT);
-    logSimulatorMessage(QStringLiteral("[diag] render after clear glError=%1")
-                            .arg(glErrorHex(functions->glGetError())));
+    g_procTable.glBindFramebuffer(GL_FRAMEBUFFER, state->framebufferId);
+    g_procTable.glViewport(0, 0, targetSize.width(), targetSize.height());
+    g_procTable.glClearColor(0.05f, 0.06f, 0.08f, 1.0f);
+    g_procTable.glClear(GL_COLOR_BUFFER_BIT);
+    g_procTable.glUseProgram(state->program);
+    g_procTable.glActiveTexture(GL_TEXTURE0);
+    g_procTable.glBindTexture(GL_TEXTURE_2D, state->sourceTextureId);
+    g_procTable.glUniform1i(state->sourceLocation, 0);
+    g_procTable.glUniform2f(state->sourceSizeLocation, GLfloat(sourceImage.width()), GLfloat(sourceImage.height()));
+    g_procTable.glUniform2f(state->outputSizeLocation, GLfloat(targetSize.width()), GLfloat(targetSize.height()));
+    g_procTable.glUniform1f(state->brightnessLocation, state->parameters.brightness);
+    g_procTable.glUniform1f(state->contrastLocation, state->parameters.contrast);
+    g_procTable.glUniform1f(state->zoomLocation, qMax(0.05f, state->parameters.zoom));
+    g_procTable.glUniform2f(state->panLocation, state->parameters.panX * 0.65f, state->parameters.panY * 0.65f);
+    g_procTable.glUniform1f(state->rotationLocation, qDegreesToRadians(state->parameters.rotationDegrees));
+    g_procTable.glUniform2f(state->flipLocation,
+                            state->parameters.flipHorizontal ? -1.0f : 1.0f,
+                            state->parameters.flipVertical ? -1.0f : 1.0f);
+    g_procTable.glUniform1i(state->heavyPassLocation, heavyPassCount);
+    g_procTable.glVertexAttribPointer(GLuint(state->positionLocation), 2, GL_FLOAT, GL_FALSE, 0, kVertices);
+    g_procTable.glEnableVertexAttribArray(GLuint(state->positionLocation));
+    g_procTable.glVertexAttribPointer(GLuint(state->texCoordLocation), 2, GL_FLOAT, GL_FALSE, 0, kTexCoords);
+    g_procTable.glEnableVertexAttribArray(GLuint(state->texCoordLocation));
+    g_procTable.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    g_procTable.glDisableVertexAttribArray(GLuint(state->positionLocation));
+    g_procTable.glDisableVertexAttribArray(GLuint(state->texCoordLocation));
+    g_procTable.glBindTexture(GL_TEXTURE_2D, 0);
+    g_procTable.glUseProgram(0);
+    g_procTable.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    g_procTable.glFlush();
 
-    state->program->bind();
-    functions->glActiveTexture(GL_TEXTURE0);
-    functions->glBindTexture(GL_TEXTURE_2D, state->sourceTextureId);
-    logSimulatorMessage(QStringLiteral("[diag] render after bind program/texture sourceTex=%1 glError=%2")
-                            .arg(state->sourceTextureId)
-                            .arg(glErrorHex(functions->glGetError())));
-    state->program->setUniformValue(state->sourceLocation, 0);
-    state->program->setUniformValue(state->sourceSizeLocation, GLfloat(sourceImage.width()), GLfloat(sourceImage.height()));
-    state->program->setUniformValue(state->outputSizeLocation, GLfloat(targetSize.width()), GLfloat(targetSize.height()));
-    state->program->setUniformValue(state->brightnessLocation, state->parameters.brightness);
-    state->program->setUniformValue(state->contrastLocation, state->parameters.contrast);
-    state->program->setUniformValue(state->zoomLocation, qMax(0.05f, state->parameters.zoom));
-    state->program->setUniformValue(state->panLocation, state->parameters.panX * 0.65f, state->parameters.panY * 0.65f);
-    state->program->setUniformValue(state->rotationLocation, qDegreesToRadians(state->parameters.rotationDegrees));
-    state->program->setUniformValue(state->flipLocation,
-                                    state->parameters.flipHorizontal ? -1.0f : 1.0f,
-                                    state->parameters.flipVertical ? -1.0f : 1.0f);
-    state->program->setUniformValue(state->heavyPassLocation, heavyPassCount);
-
-    functions->glVertexAttribPointer(state->positionLocation, 2, GL_FLOAT, GL_FALSE, 0, kVertices);
-    functions->glEnableVertexAttribArray(state->positionLocation);
-    functions->glVertexAttribPointer(state->texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, kTexCoords);
-    functions->glEnableVertexAttribArray(state->texCoordLocation);
-    logSimulatorMessage(QStringLiteral("[diag] render before draw glError=%1")
-                            .arg(glErrorHex(functions->glGetError())));
-    functions->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    logSimulatorMessage(QStringLiteral("[diag] render after draw glError=%1")
-                            .arg(glErrorHex(functions->glGetError())));
-    functions->glDisableVertexAttribArray(state->positionLocation);
-    functions->glDisableVertexAttribArray(state->texCoordLocation);
-    functions->glBindTexture(GL_TEXTURE_2D, 0);
-    state->program->release();
-    functions->glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    functions->glFlush();
-    logSimulatorMessage(QStringLiteral("[diag] render end outputTex=%1 glError=%2")
+    const GLenum finalError = g_procTable.glGetError();
+    logSimulatorDiag(QStringLiteral("[diag] render end outputTex=%1 glError=%2")
                             .arg(state->outputTextureId)
-                            .arg(glErrorHex(functions->glGetError())));
+                            .arg(glErrorHex(finalError)));
+    if (finalError != GL_NO_ERROR) {
+        if (error) {
+            *error = QStringLiteral("photo_editor_render failed with GL error %1").arg(glErrorHex(finalError));
+        }
+        return false;
+    }
 
     *textureId = state->outputTextureId;
     *size = targetSize;

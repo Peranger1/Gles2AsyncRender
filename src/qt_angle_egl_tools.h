@@ -8,6 +8,8 @@
 #include <QtANGLE/EGL/eglext.h>
 #include <QtANGLE/EGL/eglext_angle.h>
 
+struct ID3D11Device;
+
 namespace QtAngleEglTools
 {
 struct ResolvedEglApi final
@@ -33,6 +35,21 @@ struct ResolvedEglApi final
     bool supportsD3DTextureImport() const;
 };
 
+struct RendererIdentity final
+{
+    void *eglModule = nullptr;
+    QString eglModulePath;
+    EGLDisplay eglDisplay = EGL_NO_DISPLAY;
+    EGLDeviceEXT eglDevice = EGL_NO_DEVICE_EXT;
+    ID3D11Device *d3d11Device = nullptr;
+    QString adapterLuid;
+    QString eglVendor;
+    QString eglVersion;
+    QString glVendor;
+    QString glRenderer;
+    QString glVersion;
+};
+
 QString eglErrorToString(EGLint error);
 QString pointerToString(const void *value);
 QString pointerToString(quintptr value);
@@ -41,4 +58,8 @@ ResolvedEglApi resolveEglApi(QOpenGLContext *context, QStringList *probeLog = nu
 bool isUsableDisplay(EGLDisplay display, const ResolvedEglApi &api, QString *details = nullptr);
 EGLDisplay queryDisplay(QOpenGLContext *context, const ResolvedEglApi &api, QStringList *probeLog = nullptr);
 EGLConfig queryConfig(QOpenGLContext *context, QStringList *probeLog = nullptr);
+RendererIdentity queryRendererIdentity(QOpenGLContext *context,
+                                       EGLDisplay display,
+                                       const ResolvedEglApi &api,
+                                       QStringList *probeLog = nullptr);
 } // namespace QtAngleEglTools

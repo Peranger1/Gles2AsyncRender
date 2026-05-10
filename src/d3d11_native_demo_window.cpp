@@ -3,6 +3,7 @@
 #include "d3d11_import_widget.h"
 #include "d3d11_native_slot_pool.h"
 #include "d3d11_native_worker.h"
+#include "runtime_diagnostics.h"
 
 #include <QAction>
 #include <QDockWidget>
@@ -21,16 +22,18 @@
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QDebug>
 #include <QtMath>
 
 namespace
 {
 void logWindowMessage(const QString &message)
 {
-    if (!message.isEmpty()) {
-        qInfo().noquote() << "[D3D11NativeDemoWindow]" << message;
-    }
+    RuntimeDiagnostics::logInfo("[D3D11NativeDemoWindow]", message);
+}
+
+void logWindowDiag(const QString &message)
+{
+    RuntimeDiagnostics::logDiag("[D3D11NativeDemoWindow]", message);
 }
 }
 
@@ -83,13 +86,19 @@ D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
 
 D3D11NativeDemoWindow::~D3D11NativeDemoWindow()
 {
+    logWindowDiag(QStringLiteral("Destructor begin workerThreadRunning=%1 workerInitialized=%2")
+                      .arg(m_workerThread.isRunning())
+                      .arg(m_workerInitialized));
     if (m_workerThread.isRunning() && m_worker != nullptr) {
+        logWindowDiag(QStringLiteral("Invoking worker shutdown."));
         QMetaObject::invokeMethod(m_worker, "shutdown", Qt::BlockingQueuedConnection);
         m_workerThread.quit();
         m_workerThread.wait();
+        logWindowDiag(QStringLiteral("Worker thread stopped."));
     }
 
     m_worker = nullptr;
+    logWindowDiag(QStringLiteral("Destructor end"));
 }
 
 void D3D11NativeDemoWindow::onDisplayGlInitialized()
