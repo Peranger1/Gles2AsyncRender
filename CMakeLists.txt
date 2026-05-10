@@ -15,13 +15,19 @@ find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 add_executable(Gles2AsyncRender
     src/angle_threading.cpp
     src/angle_threading.h
-    src/async_gles_widget.cpp
-    src/async_gles_widget.h
-    src/main.cpp
+    src/d3d11_import_widget.cpp
+    src/d3d11_import_widget.h
+    src/d3d11_native_demo_window.cpp
+    src/d3d11_native_demo_window.h
+    src/d3d11_native_slot_pool.h
+    src/d3d11_native_worker.cpp
+    src/d3d11_native_worker.h
     src/gles_thread_guard.cpp
     src/gles_thread_guard.h
-    src/shared_texture_worker.cpp
-    src/shared_texture_worker.h
+    src/image_effect_types.h
+    src/main.cpp
+    src/qt_angle_egl_tools.cpp
+    src/qt_angle_egl_tools.h
 )
 
 target_link_libraries(Gles2AsyncRender PRIVATE
@@ -31,5 +37,5 @@ target_link_libraries(Gles2AsyncRender PRIVATE
 )
 
 if (WIN32)
-    target_link_libraries(Gles2AsyncRender PRIVATE d3d11 dxgi)
+    target_link_libraries(Gles2AsyncRender PRIVATE d3d11 dxgi d3dcompiler ole32)
 endif()

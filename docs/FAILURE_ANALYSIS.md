@@ -1,14 +1,14 @@
 ﻿# 故障分析
 
-本文记录了在 Windows 环境下验证目标架构时出现过的问题、排查过程以及最终确认的稳定路径。验证条件如下：
+本文记录了在 Windows 环境下，从旧的 worker 共享 `QOpenGLContext` 试验路径逐步收敛到当前 D3D11 native shared texture 主方案的过程中出现过的问题、排查过程以及最终确认的稳定路径。当前主分支默认运行条件如下：
 
-- Qt `5.15.2`
+- Qt `5.15.1`
 - `Qt::AA_UseOpenGLES`
 - `Qt::AA_ShareOpenGLContexts`
 - `QOpenGLWidget`
 - ANGLE / D3D11 后端
 
-目标架构始终是：
+早期试验阶段的目标架构曾经是：
 
 - UI 线程拥有 `QOpenGLWidget`
 - worker 线程在 `QOffscreenSurface` 上持有共享的 GLES2 上下文
@@ -16,7 +16,13 @@
 - 算法库输出纹理 id
 - widget 直接消费并显示这张共享纹理
 
-这里的核心要求不是 CPU 图像处理，而是依赖 OpenGL 上下文的真实 GPU 计算链路。
+这条旧路径最终没有成为当前主分支的稳定实现。当前主分支已经收敛为：
+
+- UI 线程拥有 `QOpenGLWidget`
+- worker 线程独占 D3D11 device / immediate context
+- worker 直接写入 shared texture
+- widget 通过 ANGLE/EGL import bridge 消费 shared texture
+- front / pending / retiring / free 由 slot 生命周期协议管理
 
 ## 当前状态
 
@@ -69,7 +75,7 @@
 - 共享纹理槽位注册时序问题
 - 输出几何计算策略不符合图像预览需求
 
-最新代码已在 `2026-04-26` 使用 `vcvars64.bat + qmake + nmake` 编译通过。最终的 live-resize 观感仍应以最新运行验证结果为准。
+最新代码已在 `2026-05-10` 使用 `vcvars64.bat + qmake + nmake` 编译通过。最终的 live-resize 和最大化观感仍应以最新运行验证结果为准。
 
 ## 当前结论
 
@@ -317,7 +323,7 @@
 
 - `QOpenGLWidget` 在 resize 时会重建内部 FBO，并清掉旧尺寸内容
 - 当前 widget 侧使用 `NoPartialUpdate`
-- worker 仍以异步节流方式生成新尺寸纹理
+- worker 仍以异步方式生成新尺寸纹理
 - 因此 resize 过程中会存在一个短暂空窗：
   - widget 已经切到新尺寸 FBO
   - worker 还没有提交第一张新尺寸的可显示纹理
@@ -491,40 +497,28 @@
 
 ## 当前代码结构状态
 
-当前代码被有意保留为未来真实 GPU 算法库接入所需的结构：
+当前主分支代码已经收敛为下面这组文件和职责：
 
-- `src/main_window.cpp`
+- `src/d3d11_native_demo_window.cpp`
   - 持有主窗口 UI
   - 持有 worker `QThread`
   - 在显示首帧 `frameSwapped()` 之后触发 worker 初始化
   - 负责目录导入、参数下发、状态展示和重绘请求
 
-- `src/async_gles_widget.cpp`
+- `src/d3d11_import_widget.cpp`
   - 持有显示侧 `QOpenGLWidget`
-  - 持有显示侧 front/pending 状态
-  - 只在安全时机切换新的 front texture
-  - 旧 front 会在 `frameSwapped()` 后再回收
+  - 持有显示侧 `front / pending / retiring` 状态
+  - 在 `paintGL()` 中提升新的 `front`
+  - 当前 `front` 会保持读侧 keyed mutex，只有旧 `front` 在 `frameSwapped()` 后才真正释放
 
-- `src/shared_texture_worker.cpp`
+- `src/d3d11_native_worker.cpp`
   - 作为 worker object 被移动到独立 `QThread`
-  - 使用 `SharedGlContextHandle` 持有共享 GLES2 上下文和离屏 surface
-  - 在 worker 上下文内运行图像处理 demo 管线
-  - 初始化阶段就为全部共享槽位创建并注册纹理
-  - 只对当前 render slot 渲染
+  - 独占 D3D11 device / immediate context
+  - 负责图片目录加载、源图上传、图像效果 shader 和 shared texture 输出
+  - 只对当前 render slot 分配、重建并渲染
   - 把新帧先提交为 pending，再交给 widget 提升为 front
 
-- `src/shared_gl_environment.cpp`
-  - 从显示上下文派生共享环境
-  - 创建 worker 使用的共享上下文和 `QOffscreenSurface`
-
-- `src/shared_gl_context_handle.cpp`
-  - 封装 worker 侧 `makeCurrent()` / `doneCurrent()` 生命周期
-
-- `src/image_processing_pipeline.cpp`
-  - 负责图片目录扫描和首图加载
-  - 负责源图上传、FBO 输出、图像效果 shader 和 aspect-fit 几何
-
-- `src/shared_texture_frame_pool.h`
+- `src/d3d11_native_slot_pool.h`
   - 定义共享纹理槽位池
   - 显式管理 `free / rendering / pending / front / retiring` 状态
 
@@ -533,7 +527,10 @@
   - 尝试定位 ANGLE 背后的 D3D11 device
   - 尝试启用 `ID3D11Multithread`
 
-这套形态在继续调试时应尽量保持不变，因为它已经对齐未来真实库的承载模型。
+- `src/qt_angle_egl_tools.cpp`
+  - 负责从 Qt 当前实际加载的 ANGLE/EGL 运行时解析导入桥接相关入口
+
+这套形态在继续调试时应尽量保持不变，因为它已经对齐当前主分支的真实承载模型。
 
 ## 根因归类总结
 
@@ -545,7 +542,7 @@
 
 2. 后端结构性线程冲突
    - 例如 `ClearRenderTargetView` / `GetData` 上的 `D3D11 CORRUPTION`
-   - 这是 Qt 5.15.2 + ANGLE + `QOpenGLWidget` + worker 线程 GLES 的特定组合问题
+   - 这是旧的 Qt 5.15.2 + ANGLE + `QOpenGLWidget` + worker 线程 GLES 试验路径中的特定组合问题
 
 3. 显示提交协议问题
    - 例如 resize 瞬间透明、live resize 持续透明
@@ -683,8 +680,8 @@
 
 未来真实 GPU 算法库接入时，必须严格守住一个原则：
 
-- 它必须运行在 Qt 创建出来的 worker 共享上下文上
-- 它不能悄悄再拉起另一条 EGL / GLES / ANGLE 运行时路径
+- 在当前主分支方案下，它应优先运行在 worker 独占的 D3D11 device/context 上
+- 如果它仍需接触 EGL / GLES，它不能悄悄再拉起另一条冲突的 EGL / GLES / ANGLE 运行时路径
 
 具体意味着：
 
@@ -694,20 +691,14 @@
 
 ## 相关文件
 
-- `src/main_window.cpp`
-- `src/main_window.h`
-- `src/async_gles_widget.cpp`
-- `src/async_gles_widget.h`
-- `src/image_processing_pipeline.cpp`
-- `src/image_processing_pipeline.h`
-- `src/shared_gl_environment.cpp`
-- `src/shared_gl_environment.h`
-- `src/shared_gl_context_handle.cpp`
-- `src/shared_gl_context_handle.h`
-- `src/shared_texture_frame_pool.h`
-- `src/shared_texture_worker.cpp`
-- `src/shared_texture_worker.h`
+- `src/d3d11_native_demo_window.cpp`
+- `src/d3d11_native_demo_window.h`
+- `src/d3d11_import_widget.cpp`
+- `src/d3d11_import_widget.h`
+- `src/d3d11_native_worker.cpp`
+- `src/d3d11_native_worker.h`
+- `src/d3d11_native_slot_pool.h`
 - `src/angle_threading.cpp`
 - `src/angle_threading.h`
-- `src/gles_thread_guard.cpp`
-- `src/gles_thread_guard.h`
+- `src/qt_angle_egl_tools.cpp`
+- `src/qt_angle_egl_tools.h`

@@ -1,11 +1,11 @@
 #include <QApplication>
+#include <QDebug>
 #include <QMetaType>
 #include <QSurfaceFormat>
 
+#include "d3d11_native_demo_window.h"
+#include "d3d11_native_slot_pool.h"
 #include "image_effect_types.h"
-#include "main_window.h"
-#include "shared_gl_context_handle.h"
-#include "shared_texture_frame_pool.h"
 
 int main(int argc, char *argv[])
 {
@@ -28,10 +28,10 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Gles2AsyncRender"));
     qRegisterMetaType<ImageEffectParameters>("ImageEffectParameters");
-    qRegisterMetaType<SharedGlContextHandle *>("SharedGlContextHandle*");
-    qRegisterMetaType<SharedTextureFramePool *>("SharedTextureFramePool*");
+    qRegisterMetaType<D3D11NativeSlotPool *>("D3D11NativeSlotPool*");
+    qRegisterMetaType<quint64>("quint64");
 
-    MainWindow window;
+    D3D11NativeDemoWindow window;
     window.show();
 
     return app.exec();

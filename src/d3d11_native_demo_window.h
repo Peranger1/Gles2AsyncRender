@@ -4,23 +4,25 @@
 
 #include <QMainWindow>
 #include <QThread>
+#include <memory>
 
 class QAction;
-class AsyncGlesWidget;
+class D3D11ImportWidget;
+class D3D11NativeSlotPool;
+class D3D11NativeWorker;
 class QLabel;
+class QDockWidget;
 class QPushButton;
 class QSlider;
-class QDockWidget;
-class SharedGlEnvironment;
-class SharedTextureWorker;
+class QString;
 
-class MainWindow final : public QMainWindow
+class D3D11NativeDemoWindow final : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow() override;
+    explicit D3D11NativeDemoWindow(QWidget *parent = nullptr);
+    ~D3D11NativeDemoWindow() override;
 
 private slots:
     void onDisplayGlInitialized();
@@ -30,16 +32,16 @@ private slots:
     void showPreviousImage();
     void onImageEffectControlChanged();
     void resetImageEffects();
-    void onImageDirectoryLoadFinished(
-        bool loaded,
-        const QString &errorMessage,
-        int currentIndex,
-        int count,
-        const QString &displayName);
+    void onImageDirectoryLoadFinished(bool loaded,
+                                      const QString &errorMessage,
+                                      int currentIndex,
+                                      int count,
+                                      const QString &displayName);
     void onImageSelectionChanged(int currentIndex, int count, const QString &displayName);
     void onWorkerError(const QString &reason);
     void onWorkerStatus(const QString &message);
     void onRenderTimingUpdated(double elapsedMs);
+    void onFramePresented(quint64 frameIndex, QSize size);
 
 private:
     void setupActions();
@@ -50,9 +52,9 @@ private:
     void pushEffectParameters();
     void requestRender();
 
-    AsyncGlesWidget *m_displayWidget = nullptr;
-    SharedGlEnvironment *m_sharedGlEnvironment = nullptr;
-    SharedTextureWorker *m_worker = nullptr;
+    D3D11ImportWidget *m_displayWidget = nullptr;
+    std::shared_ptr<D3D11NativeSlotPool> m_slotPool;
+    D3D11NativeWorker *m_worker = nullptr;
     QThread m_workerThread;
 
     QAction *m_openDirectoryAction = nullptr;
@@ -83,4 +85,5 @@ private:
     int m_imageCount = 0;
     QString m_currentImageName;
     double m_lastRenderElapsedMs = 0.0;
+    QSize m_lastPresentedSize;
 };

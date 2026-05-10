@@ -1,5 +1,11 @@
 ﻿# Windows / macOS / Linux 三平台统一接入约束
 
+> 2026-05-10 状态说明
+>
+> 本文档讨论的是旧的“worker 共享 `QOpenGLContext`”跨平台接入约束，不代表当前主分支已经落地的默认实现。
+>
+> 当前主分支已经收敛到 Windows 优先的 D3D11 native shared texture 主路径，因此本文更适合作为历史约束和备选路线参考。
+
 本文定义当前这套多线程 GPU 渲染方案在 Windows、macOS、Linux 三个平台上的统一架构边界，以及各平台必须分开处理的后端差异。
 
 目标场景是：

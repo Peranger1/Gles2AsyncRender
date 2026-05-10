@@ -1,10 +1,8 @@
-#include "main_window.h"
+#include "d3d11_native_demo_window.h"
 
-#include "async_gles_widget.h"
-#include "shared_gl_context_handle.h"
-#include "shared_gl_environment.h"
-#include "shared_texture_frame_pool.h"
-#include "shared_texture_worker.h"
+#include "d3d11_import_widget.h"
+#include "d3d11_native_slot_pool.h"
+#include "d3d11_native_worker.h"
 
 #include <QAction>
 #include <QDockWidget>
@@ -25,49 +23,55 @@
 #include <QWidget>
 #include <QtMath>
 
-MainWindow::MainWindow(QWidget *parent)
+D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
     : QMainWindow(parent)
-    , m_displayWidget(new AsyncGlesWidget(this))
-    , m_sharedGlEnvironment(new SharedGlEnvironment(this))
-    , m_worker(new SharedTextureWorker())
+    , m_displayWidget(new D3D11ImportWidget(this))
+    , m_slotPool(std::make_shared<D3D11NativeSlotPool>(3))
+    , m_worker(new D3D11NativeWorker())
 {
-    setWindowTitle(QStringLiteral("GLES2 Async Image Processing Demo"));
+    setWindowTitle(QStringLiteral("Gles2AsyncRender"));
     resize(1280, 760);
 
-    m_displayWidget->setSharedGlEnvironment(m_sharedGlEnvironment);
+    m_displayWidget->setSlotPool(m_slotPool);
     setCentralWidget(m_displayWidget);
 
-    m_workerThread.setObjectName(QStringLiteral("SharedTextureWorkerThread"));
+    m_workerThread.setObjectName(QStringLiteral("D3D11NativeWorkerThread"));
     m_worker->moveToThread(&m_workerThread);
     connect(&m_workerThread, &QThread::finished, m_worker, &QObject::deleteLater);
 
-    connect(m_displayWidget, &AsyncGlesWidget::glInitialized,
-            this, &MainWindow::onDisplayGlInitialized,
+    connect(m_displayWidget, &D3D11ImportWidget::glInitialized,
+            this, &D3D11NativeDemoWindow::onDisplayGlInitialized,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &AsyncGlesWidget::displayReadyForWorker,
-            this, &MainWindow::onDisplayReadyForWorker,
+    connect(m_displayWidget, &D3D11ImportWidget::displayReadyForWorker,
+            this, &D3D11NativeDemoWindow::onDisplayReadyForWorker,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &AsyncGlesWidget::outputSizeChanged,
-            m_worker, &SharedTextureWorker::setOutputSize,
+    connect(m_displayWidget, &D3D11ImportWidget::outputSizeChanged,
+            m_worker, &D3D11NativeWorker::setOutputSize,
+            Qt::QueuedConnection);
+    connect(m_displayWidget, &D3D11ImportWidget::statusMessage,
+            this, &D3D11NativeDemoWindow::onWorkerStatus,
+            Qt::QueuedConnection);
+    connect(m_displayWidget, &D3D11ImportWidget::framePresented,
+            this, &D3D11NativeDemoWindow::onFramePresented,
             Qt::QueuedConnection);
 
-    connect(m_worker, &SharedTextureWorker::textureReady,
-            m_displayWidget, &AsyncGlesWidget::onTextureReady,
+    connect(m_worker, &D3D11NativeWorker::frameReady,
+            m_displayWidget, &D3D11ImportWidget::onFrameReady,
             Qt::QueuedConnection);
-    connect(m_worker, &SharedTextureWorker::initializationFailed,
-            this, &MainWindow::onWorkerError,
+    connect(m_worker, &D3D11NativeWorker::initializationFailed,
+            this, &D3D11NativeDemoWindow::onWorkerError,
             Qt::QueuedConnection);
-    connect(m_worker, &SharedTextureWorker::statusMessage,
-            this, &MainWindow::onWorkerStatus,
+    connect(m_worker, &D3D11NativeWorker::statusMessage,
+            this, &D3D11NativeDemoWindow::onWorkerStatus,
             Qt::QueuedConnection);
-    connect(m_worker, &SharedTextureWorker::imageDirectoryLoadFinished,
-            this, &MainWindow::onImageDirectoryLoadFinished,
+    connect(m_worker, &D3D11NativeWorker::imageDirectoryLoadFinished,
+            this, &D3D11NativeDemoWindow::onImageDirectoryLoadFinished,
             Qt::QueuedConnection);
-    connect(m_worker, &SharedTextureWorker::imageSelectionChanged,
-            this, &MainWindow::onImageSelectionChanged,
+    connect(m_worker, &D3D11NativeWorker::imageSelectionChanged,
+            this, &D3D11NativeDemoWindow::onImageSelectionChanged,
             Qt::QueuedConnection);
-    connect(m_worker, &SharedTextureWorker::renderTimingUpdated,
-            this, &MainWindow::onRenderTimingUpdated,
+    connect(m_worker, &D3D11NativeWorker::renderTimingUpdated,
+            this, &D3D11NativeDemoWindow::onRenderTimingUpdated,
             Qt::QueuedConnection);
 
     m_workerThread.start();
@@ -75,10 +79,10 @@ MainWindow::MainWindow(QWidget *parent)
     setupActions();
     setupImageEffectControls();
     updateImageActions();
-    updateStatusBarMessage(QStringLiteral("Waiting for display OpenGL initialization..."));
+    updateStatusBarMessage(QStringLiteral("Waiting for D3D11 import widget initialization..."));
 }
 
-MainWindow::~MainWindow()
+D3D11NativeDemoWindow::~D3D11NativeDemoWindow()
 {
     if (m_workerThread.isRunning() && m_worker != nullptr) {
         QMetaObject::invokeMethod(m_worker, "shutdown", Qt::BlockingQueuedConnection);
@@ -89,12 +93,12 @@ MainWindow::~MainWindow()
     m_worker = nullptr;
 }
 
-void MainWindow::onDisplayGlInitialized()
+void D3D11NativeDemoWindow::onDisplayGlInitialized()
 {
-    updateStatusBarMessage(QStringLiteral("Display context is ready. Waiting for the first frame swap before starting the worker..."));
+    updateStatusBarMessage(QStringLiteral("Display import widget is ready. Waiting for the first frame swap before starting the D3D11 worker..."));
 }
 
-void MainWindow::onDisplayReadyForWorker()
+void D3D11NativeDemoWindow::onDisplayReadyForWorker()
 {
     if (m_workerInitialized || m_workerInitAttempted || m_worker == nullptr) {
         return;
@@ -102,27 +106,17 @@ void MainWindow::onDisplayReadyForWorker()
 
     m_workerInitAttempted = true;
 
-    SharedGlContextHandle *handle = m_sharedGlEnvironment->createSharedContext();
     bool initialized = false;
-    if (handle != nullptr) {
-        handle->moveToThread(&m_workerThread);
-        if (handle->context() != nullptr) {
-            handle->context()->moveToThread(&m_workerThread);
-        }
-
-        const bool invoked = QMetaObject::invokeMethod(
-            m_worker,
-            "initialize",
-            Qt::BlockingQueuedConnection,
-            Q_RETURN_ARG(bool, initialized),
-            Q_ARG(SharedGlContextHandle *, handle),
-            Q_ARG(SharedTextureFramePool *, m_displayWidget->framePool()),
-            Q_ARG(QSize, m_displayWidget->outputPixelSize()));
-        initialized = invoked && initialized;
-    }
-
+    const bool invoked = QMetaObject::invokeMethod(
+        m_worker,
+        "initialize",
+        Qt::BlockingQueuedConnection,
+        Q_RETURN_ARG(bool, initialized),
+        Q_ARG(D3D11NativeSlotPool *, m_slotPool.get()),
+        Q_ARG(QSize, m_displayWidget->outputPixelSize()));
+    initialized = invoked && initialized;
     if (!initialized) {
-        updateStatusBarMessage(QStringLiteral("Worker initialization failed."));
+        updateStatusBarMessage(QStringLiteral("D3D11 native worker initialization failed."));
         return;
     }
 
@@ -130,13 +124,13 @@ void MainWindow::onDisplayReadyForWorker()
     pushEffectParameters();
     requestRender();
     updateImageActions();
-    updateStatusBarMessage(QStringLiteral("Worker is ready. You can import an image directory now."));
+    updateStatusBarMessage(QStringLiteral("D3D11 native worker is ready. Import an image directory to start the demo."));
 }
 
-void MainWindow::openImageDirectory()
+void D3D11NativeDemoWindow::openImageDirectory()
 {
     if (!m_workerInitialized) {
-        QMessageBox::warning(this, QStringLiteral("Worker Not Ready"), QStringLiteral("The worker is not initialized yet."));
+        QMessageBox::warning(this, QStringLiteral("Worker Not Ready"), QStringLiteral("The D3D11 native worker is not initialized yet."));
         return;
     }
 
@@ -154,10 +148,10 @@ void MainWindow::openImageDirectory()
         "loadImageDirectory",
         Qt::QueuedConnection,
         Q_ARG(QString, directoryPath));
-    updateStatusBarMessage(QStringLiteral("Loading image directory..."));
+    updateStatusBarMessage(QStringLiteral("Loading image directory into D3D11 worker..."));
 }
 
-void MainWindow::showNextImage()
+void D3D11NativeDemoWindow::showNextImage()
 {
     if (!m_workerInitialized || m_imageCount <= 0) {
         return;
@@ -166,7 +160,7 @@ void MainWindow::showNextImage()
     QMetaObject::invokeMethod(m_worker, "selectNextImage", Qt::QueuedConnection);
 }
 
-void MainWindow::showPreviousImage()
+void D3D11NativeDemoWindow::showPreviousImage()
 {
     if (!m_workerInitialized || m_imageCount <= 0) {
         return;
@@ -175,7 +169,7 @@ void MainWindow::showPreviousImage()
     QMetaObject::invokeMethod(m_worker, "selectPreviousImage", Qt::QueuedConnection);
 }
 
-void MainWindow::onImageEffectControlChanged()
+void D3D11NativeDemoWindow::onImageEffectControlChanged()
 {
     m_effectParameters.brightness = float(m_brightnessSlider->value()) / 100.0f;
     m_effectParameters.contrast = float(m_contrastSlider->value()) / 100.0f;
@@ -189,7 +183,7 @@ void MainWindow::onImageEffectControlChanged()
     requestRender();
 }
 
-void MainWindow::resetImageEffects()
+void D3D11NativeDemoWindow::resetImageEffects()
 {
     m_effectParameters = {};
     setImageEffectControlsFromState();
@@ -197,18 +191,18 @@ void MainWindow::resetImageEffects()
     requestRender();
 }
 
-void MainWindow::onImageDirectoryLoadFinished(
-    bool loaded,
-    const QString &errorMessage,
-    int currentIndex,
-    int count,
-    const QString &displayName)
+void D3D11NativeDemoWindow::onImageDirectoryLoadFinished(bool loaded,
+                                                         const QString &errorMessage,
+                                                         int currentIndex,
+                                                         int count,
+                                                         const QString &displayName)
 {
     if (!loaded) {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("Image Loading Failed"),
-            errorMessage.isEmpty() ? QStringLiteral("No images could be loaded from the selected directory.") : errorMessage);
+        QMessageBox::warning(this,
+                             QStringLiteral("Image Loading Failed"),
+                             errorMessage.isEmpty()
+                                 ? QStringLiteral("No images could be loaded from the selected directory.")
+                                 : errorMessage);
         m_currentImageIndex = -1;
         m_imageCount = 0;
         m_currentImageName.clear();
@@ -224,7 +218,7 @@ void MainWindow::onImageDirectoryLoadFinished(
     updateStatusBarMessage();
 }
 
-void MainWindow::onImageSelectionChanged(int currentIndex, int count, const QString &displayName)
+void D3D11NativeDemoWindow::onImageSelectionChanged(int currentIndex, int count, const QString &displayName)
 {
     m_currentImageIndex = currentIndex;
     m_imageCount = count;
@@ -233,49 +227,62 @@ void MainWindow::onImageSelectionChanged(int currentIndex, int count, const QStr
     updateStatusBarMessage();
 }
 
-void MainWindow::onWorkerError(const QString &reason)
+void D3D11NativeDemoWindow::onWorkerError(const QString &reason)
 {
     updateStatusBarMessage(QStringLiteral("Worker error: %1").arg(reason));
     QMessageBox::warning(this, QStringLiteral("Worker Error"), reason);
 }
 
-void MainWindow::onWorkerStatus(const QString &message)
+void D3D11NativeDemoWindow::onWorkerStatus(const QString &message)
 {
     if (!message.isEmpty()) {
         updateStatusBarMessage(message);
     }
 }
 
-void MainWindow::onRenderTimingUpdated(double elapsedMs)
+void D3D11NativeDemoWindow::onRenderTimingUpdated(double elapsedMs)
 {
     m_lastRenderElapsedMs = elapsedMs;
     updateStatusBarMessage();
 }
 
-void MainWindow::setupActions()
+void D3D11NativeDemoWindow::onFramePresented(quint64 frameIndex, QSize size)
+{
+    Q_UNUSED(frameIndex);
+    m_lastPresentedSize = size;
+    updateStatusBarMessage();
+}
+
+void D3D11NativeDemoWindow::setupActions()
 {
     QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("File"));
     m_openDirectoryAction = fileMenu->addAction(QStringLiteral("Open Image Directory"));
-    connect(m_openDirectoryAction, &QAction::triggered, this, &MainWindow::openImageDirectory);
+    m_openDirectoryAction->setShortcut(QKeySequence::Open);
+    connect(m_openDirectoryAction, &QAction::triggered, this, &D3D11NativeDemoWindow::openImageDirectory);
 
     QMenu *imageMenu = menuBar()->addMenu(QStringLiteral("Image"));
     m_previousImageAction = imageMenu->addAction(QStringLiteral("Previous"));
     m_previousImageAction->setShortcut(QKeySequence::MoveToPreviousPage);
-    connect(m_previousImageAction, &QAction::triggered, this, &MainWindow::showPreviousImage);
+    connect(m_previousImageAction, &QAction::triggered, this, &D3D11NativeDemoWindow::showPreviousImage);
 
     m_nextImageAction = imageMenu->addAction(QStringLiteral("Next"));
     m_nextImageAction->setShortcut(QKeySequence::MoveToNextPage);
-    connect(m_nextImageAction, &QAction::triggered, this, &MainWindow::showNextImage);
+    connect(m_nextImageAction, &QAction::triggered, this, &D3D11NativeDemoWindow::showNextImage);
 
     imageMenu->addSeparator();
     QAction *resetEffectsAction = imageMenu->addAction(QStringLiteral("Reset Effects"));
-    connect(resetEffectsAction, &QAction::triggered, this, &MainWindow::resetImageEffects);
+    connect(resetEffectsAction, &QAction::triggered, this, &D3D11NativeDemoWindow::resetImageEffects);
+
+    QMenu *renderMenu = menuBar()->addMenu(QStringLiteral("Render"));
+    QAction *requestFrameAction = renderMenu->addAction(QStringLiteral("Render Once"));
+    connect(requestFrameAction, &QAction::triggered, this, &D3D11NativeDemoWindow::requestRender);
 }
 
-void MainWindow::setupImageEffectControls()
+void D3D11NativeDemoWindow::setupImageEffectControls()
 {
-    m_imageEffectDock = new QDockWidget(QStringLiteral("Image Effects"), this);
+    m_imageEffectDock = new QDockWidget(QStringLiteral("Producer Controls"), this);
     m_imageEffectDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    m_imageEffectDock->setMaximumWidth(400);
 
     QWidget *panel = new QWidget(m_imageEffectDock);
     QVBoxLayout *layout = new QVBoxLayout(panel);
@@ -302,7 +309,7 @@ void MainWindow::setupImageEffectControls()
     m_panXSlider = addSlider(QStringLiteral("Pan X"), -100, 100, 0, &m_panXValueLabel);
     m_panYSlider = addSlider(QStringLiteral("Pan Y"), -100, 100, 0, &m_panYValueLabel);
     m_rotationSlider = addSlider(QStringLiteral("Rotation"), -180, 180, 0, &m_rotationValueLabel);
-    m_heavyGpuSlider = addSlider(QStringLiteral("GPU Stress Passes"), 0, 256, 0, &m_heavyGpuValueLabel);
+    m_heavyGpuSlider = addSlider(QStringLiteral("GPU Stress Loops"), 0, 512, 0, &m_heavyGpuValueLabel);
 
     QLabel *flipLabel = new QLabel(QStringLiteral("Flip"), panel);
     QHBoxLayout *flipLayout = new QHBoxLayout();
@@ -315,18 +322,17 @@ void MainWindow::setupImageEffectControls()
 
     layout->addWidget(flipLabel);
     layout->addLayout(flipLayout);
-    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Passes runs extra worker-side offscreen GL passes for stress testing."), panel));
-    layout->addWidget(new QLabel(QStringLiteral("The displayed image also shifts toward an embossed / local chromatic-dispersion look as stress increases."), panel));
-    layout->addWidget(new QLabel(QStringLiteral("All image effects run in the worker GL context."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Loops runs additional pixel-shader iterations on the D3D11 worker before ReleaseSync(1)."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("This path keeps ANGLE/QOpenGLWidget only on the consumer side and removes worker-side GLES context contention."), panel));
     layout->addStretch(1);
 
-    connect(m_brightnessSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
-    connect(m_contrastSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
-    connect(m_zoomSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
-    connect(m_panXSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
-    connect(m_panYSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
-    connect(m_rotationSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
-    connect(m_heavyGpuSlider, &QSlider::valueChanged, this, &MainWindow::onImageEffectControlChanged);
+    connect(m_brightnessSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
+    connect(m_contrastSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
+    connect(m_zoomSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
+    connect(m_panXSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
+    connect(m_panYSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
+    connect(m_rotationSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
+    connect(m_heavyGpuSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);
     connect(m_flipHorizontalButton, &QPushButton::toggled, this, [this](bool checked) {
         m_effectParameters.flipHorizontal = checked;
         setImageEffectControlsFromState();
@@ -345,7 +351,7 @@ void MainWindow::setupImageEffectControls()
     setImageEffectControlsFromState();
 }
 
-void MainWindow::setImageEffectControlsFromState()
+void D3D11NativeDemoWindow::setImageEffectControlsFromState()
 {
     const QSignalBlocker brightnessBlocker(m_brightnessSlider);
     const QSignalBlocker contrastBlocker(m_contrastSlider);
@@ -375,10 +381,37 @@ void MainWindow::setImageEffectControlsFromState()
     m_panXValueLabel->setText(QString::number(m_effectParameters.panX, 'f', 2));
     m_panYValueLabel->setText(QString::number(m_effectParameters.panY, 'f', 2));
     m_rotationValueLabel->setText(QStringLiteral("%1 deg").arg(int(qRound(m_effectParameters.rotationDegrees))));
-    m_heavyGpuValueLabel->setText(QStringLiteral("%1 passes").arg(m_effectParameters.heavyGpuPassCount));
+    m_heavyGpuValueLabel->setText(QStringLiteral("%1 loops").arg(m_effectParameters.heavyGpuPassCount));
 }
 
-void MainWindow::updateImageActions()
+void D3D11NativeDemoWindow::updateStatusBarMessage(const QString &message)
+{
+    if (!message.isEmpty()) {
+        statusBar()->showMessage(message);
+        return;
+    }
+
+    if (!m_workerInitialized) {
+        statusBar()->showMessage(QStringLiteral("Waiting for D3D11 native worker initialization..."));
+        return;
+    }
+
+    if (m_imageCount <= 0) {
+        statusBar()->showMessage(QStringLiteral("D3D11 native worker is ready. Import an image directory to start the demo."));
+        return;
+    }
+
+    statusBar()->showMessage(QStringLiteral("%1 / %2  %3  Output:%4x%5  Worker:%6 ms  Stress:%7 loops")
+        .arg(m_currentImageIndex + 1)
+        .arg(m_imageCount)
+        .arg(m_currentImageName)
+        .arg(m_lastPresentedSize.isValid() ? m_lastPresentedSize.width() : m_displayWidget->outputPixelSize().width())
+        .arg(m_lastPresentedSize.isValid() ? m_lastPresentedSize.height() : m_displayWidget->outputPixelSize().height())
+        .arg(QString::number(m_lastRenderElapsedMs, 'f', 1))
+        .arg(m_effectParameters.heavyGpuPassCount));
+}
+
+void D3D11NativeDemoWindow::updateImageActions()
 {
     const bool ready = m_workerInitialized && m_imageCount > 0;
     if (m_previousImageAction != nullptr) {
@@ -392,34 +425,7 @@ void MainWindow::updateImageActions()
     }
 }
 
-void MainWindow::updateStatusBarMessage(const QString &message)
-{
-    if (!message.isEmpty()) {
-        statusBar()->showMessage(message);
-        return;
-    }
-
-    if (!m_workerInitialized) {
-        statusBar()->showMessage(QStringLiteral("Waiting for worker initialization..."));
-        return;
-    }
-
-    if (m_imageCount <= 0) {
-        statusBar()->showMessage(QStringLiteral("Worker is ready. Import an image directory to start the demo."));
-        return;
-    }
-
-    statusBar()->showMessage(QStringLiteral("%1 / %2  %3  Output:%4x%5  Worker:%6 ms  Stress:%7")
-        .arg(m_currentImageIndex + 1)
-        .arg(m_imageCount)
-        .arg(m_currentImageName)
-        .arg(m_displayWidget->outputPixelSize().width())
-        .arg(m_displayWidget->outputPixelSize().height())
-        .arg(QString::number(m_lastRenderElapsedMs, 'f', 1))
-        .arg(m_effectParameters.heavyGpuPassCount));
-}
-
-void MainWindow::pushEffectParameters()
+void D3D11NativeDemoWindow::pushEffectParameters()
 {
     if (!m_workerInitialized || m_worker == nullptr) {
         return;
@@ -432,7 +438,7 @@ void MainWindow::pushEffectParameters()
         Q_ARG(ImageEffectParameters, m_effectParameters));
 }
 
-void MainWindow::requestRender()
+void D3D11NativeDemoWindow::requestRender()
 {
     if (!m_workerInitialized || m_worker == nullptr) {
         return;

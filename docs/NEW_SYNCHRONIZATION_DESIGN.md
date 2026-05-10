@@ -6,9 +6,9 @@
 >
 > 当前分支在实际运行中已经证明：
 >
-> - 去掉全局 GL 串行化后，导入图片等路径会触发 ANGLE 内部断言
-> - 断言位置位于 `StateManager11.cpp:1992`，说明共享 renderer/state manager 在双上下文并发下不满足当前设计假设
-> - 因此当前实现已经回退到“异步调度 + 共享纹理显示 + 全局 GL 串行化”的兼容模式
+> - 旧的双 `QOpenGLContext` / GLES 同步路线并没有成为当前主分支的最终稳定实现
+> - 当前主分支已经进一步收敛到 D3D11 native shared texture 主路径
+> - `QOpenGLWidget` 现在只负责通过 ANGLE/EGL import bridge 显示 shared texture，而不是与 worker 共享 GLES 渲染主路径
 >
 > 如果后续要继续推进本文方案，需要先切换运行时基础，例如更换后端或直接转向 D3D11 原生共享纹理同步。
 
