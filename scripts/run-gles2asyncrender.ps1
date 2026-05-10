@@ -181,7 +181,15 @@ if ($programArgs.Count -gt 0) {
 }
 
 Write-Info $commandLine
-$process = Start-Process -FilePath $exePath -ArgumentList $programArgs -WorkingDirectory $workingDirectory -PassThru
+$startProcessParameters = @{
+    FilePath = $exePath
+    WorkingDirectory = $workingDirectory
+    PassThru = $true
+}
+if ($programArgs.Count -gt 0) {
+    $startProcessParameters.ArgumentList = $programArgs
+}
+$process = Start-Process @startProcessParameters
 Write-Info ("Started PID {0}" -f $process.Id)
 
 if ($Wait) {

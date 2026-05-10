@@ -37,14 +37,20 @@ signals:
                                     const QString &displayName,
                                     QSize imageSize);
     void imageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize);
+    void processingProgressChanged(int progress);
 
 private:
     struct Impl;
 
     QSize currentOutputSize() const;
+    ImageEffectParameters currentEffectParameters() const;
     void scheduleRender(int delayMs = 0);
     void emitImageSelection();
 
+private slots:
+    void onProcessProgressEvent(int progress, bool isEnd);
+
+private:
     std::unique_ptr<Impl> m_impl;
     D3D11NativeSlotPool *m_slotPool = nullptr;
     ImageEffectParameters m_effectParameters;

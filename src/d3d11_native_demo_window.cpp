@@ -307,8 +307,8 @@ void D3D11NativeDemoWindow::setupImageEffectControls()
 
     layout->addWidget(flipLabel);
     layout->addLayout(flipLayout);
-    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Loops runs additional pixel-shader iterations on the D3D11 worker before ReleaseSync(1)."), panel));
-    layout->addWidget(new QLabel(QStringLiteral("This path keeps ANGLE/QOpenGLWidget only on the consumer side and removes worker-side GLES context contention."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Loops runs additional GLES2 simulator iterations before the result is published into the shared D3D11 slot."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("The worker now uses an independent non-shared algorithm context and only the final publish step reaches the shared texture path."), panel));
     layout->addStretch(1);
 
     connect(m_brightnessSlider, &QSlider::valueChanged, this, &D3D11NativeDemoWindow::onImageEffectControlChanged);

@@ -1,38 +1,27 @@
 #include "d3d11_native_worker.h"
 
+#include "angle_shared_texture_publish_bridge.h"
 #include "d3d11_native_slot_pool.h"
+#include "photo_editor_gles2_simulator.h"
+#include "photo_editor_library_host.h"
+#include "photo_editor_session.h"
 
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
+#include <QMetaObject>
 #include <QMutexLocker>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QSurfaceFormat>
 #include <QThread>
 #include <QTimer>
 #include <QVector>
 #include <QDebug>
-#include <QtMath>
-
-#include <cstring>
-#include <d3d11.h>
-#include <d3dcompiler.h>
-#include <dxgi.h>
-#include <wrl/client.h>
-
-using Microsoft::WRL::ComPtr;
 
 namespace
 {
-QString hresultToString(HRESULT hr)
-{
-    return QStringLiteral("0x%1").arg(static_cast<unsigned int>(hr), 0, 16);
-}
-
-bool isAcquireTimeout(HRESULT hr)
-{
-    return hr == WAIT_TIMEOUT || hr == DXGI_ERROR_WAIT_TIMEOUT;
-}
-
 void logWorkerMessage(const QString &message)
 {
     if (!message.isEmpty()) {
@@ -40,333 +29,56 @@ void logWorkerMessage(const QString &message)
     }
 }
 
+QString formatParameters(const ImageEffectParameters &parameters)
+{
+    return QStringLiteral("brightness=%1 contrast=%2 zoom=%3 pan=(%4,%5) rotation=%6 flipH=%7 flipV=%8 heavyPass=%9")
+        .arg(QString::number(parameters.brightness, 'f', 3))
+        .arg(QString::number(parameters.contrast, 'f', 3))
+        .arg(QString::number(parameters.zoom, 'f', 3))
+        .arg(QString::number(parameters.panX, 'f', 3))
+        .arg(QString::number(parameters.panY, 'f', 3))
+        .arg(QString::number(parameters.rotationDegrees, 'f', 3))
+        .arg(parameters.flipHorizontal)
+        .arg(parameters.flipVertical)
+        .arg(parameters.heavyGpuPassCount);
+}
+
 QSize sanitizedSize(const QSize &size)
 {
     return QSize(qMax(1, size.width()), qMax(1, size.height()));
 }
 
-UINT alignConstantBufferByteWidth(UINT size)
+void processProgressThunk(int progress, bool isEnd, void *userData)
 {
-    return (size + 15u) & ~15u;
-}
-
-bool createD3D11Device(ComPtr<ID3D11Device> *device,
-                       ComPtr<ID3D11DeviceContext> *context,
-                       QString *error)
-{
-    if (device == nullptr || context == nullptr) {
-        if (error) {
-            *error = QStringLiteral("createD3D11Device prerequisites are incomplete.");
-        }
-        return false;
+    D3D11NativeWorker *worker = static_cast<D3D11NativeWorker *>(userData);
+    if (worker == nullptr) {
+        return;
     }
 
-    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    static const D3D_FEATURE_LEVEL kLevels[] = {
-        D3D_FEATURE_LEVEL_11_0,
-        D3D_FEATURE_LEVEL_10_1,
-        D3D_FEATURE_LEVEL_10_0
-    };
-
-    D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
-    HRESULT hr = D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        flags,
-        kLevels,
-        ARRAYSIZE(kLevels),
-        D3D11_SDK_VERSION,
-        device->ReleaseAndGetAddressOf(),
-        &featureLevel,
-        context->ReleaseAndGetAddressOf());
-
-    if (FAILED(hr)) {
-        hr = D3D11CreateDevice(
-            nullptr,
-            D3D_DRIVER_TYPE_WARP,
-            nullptr,
-            flags,
-            kLevels,
-            ARRAYSIZE(kLevels),
-            D3D11_SDK_VERSION,
-            device->ReleaseAndGetAddressOf(),
-            &featureLevel,
-            context->ReleaseAndGetAddressOf());
-    }
-
-    if (FAILED(hr) || !(*device) || !(*context)) {
-        if (error) {
-            *error = QStringLiteral("D3D11CreateDevice failed: %1").arg(hresultToString(hr));
-        }
-        return false;
-    }
-
-    return true;
-}
-
-HRESULT compileShader(const char *source,
-                      const char *entryPoint,
-                      const char *target,
-                      ComPtr<ID3DBlob> *blob,
-                      QString *error)
-{
-    if (blob == nullptr) {
-        return E_INVALIDARG;
-    }
-
-    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#ifdef _DEBUG
-    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-    ComPtr<ID3DBlob> errorBlob;
-    const HRESULT hr = D3DCompile(source,
-                                  strlen(source),
-                                  nullptr,
-                                  nullptr,
-                                  nullptr,
-                                  entryPoint,
-                                  target,
-                                  flags,
-                                  0,
-                                  blob->ReleaseAndGetAddressOf(),
-                                  errorBlob.GetAddressOf());
-    if (FAILED(hr) && error) {
-        const QString compilerText = errorBlob
-            ? QString::fromLocal8Bit(static_cast<const char *>(errorBlob->GetBufferPointer()), int(errorBlob->GetBufferSize()))
-            : QStringLiteral("<no compiler diagnostics>");
-        *error = QStringLiteral("D3DCompile(%1, %2) failed: %3\n%4")
-                     .arg(QString::fromLatin1(entryPoint),
-                          QString::fromLatin1(target),
-                          hresultToString(hr),
-                          compilerText);
-    }
-    return hr;
+    QMetaObject::invokeMethod(
+        worker,
+        "onProcessProgressEvent",
+        Qt::QueuedConnection,
+        Q_ARG(int, progress),
+        Q_ARG(bool, isEnd));
 }
 } // namespace
 
 struct D3D11NativeWorker::Impl final
 {
-    struct SlotResources final
-    {
-        ComPtr<ID3D11Texture2D> texture;
-        ComPtr<ID3D11RenderTargetView> rtv;
-        ComPtr<IDXGIKeyedMutex> keyedMutex;
-        quintptr sharedHandle = 0;
-        QSize size;
-        quint64 generation = 0;
-    };
+    QSurfaceFormat glFormat;
+    std::unique_ptr<QOffscreenSurface> librarySurface;
+    std::unique_ptr<QOpenGLContext> libraryContext;
+    PhotoEditorLibraryHost libraryHost;
+    AngleSharedTexturePublishBridge publishBridge;
+    PhotoEditorSession session;
 
-    struct Constants final
-    {
-        float brightness = 0.0f;
-        float contrast = 1.0f;
-        float zoom = 1.0f;
-        float panX = 0.0f;
-        float panY = 0.0f;
-        float rotationRadians = 0.0f;
-        float flipX = 1.0f;
-        float flipY = 1.0f;
-        float timeValue = 0.0f;
-        unsigned int heavyPassCount = 0;
-        float outputWidth = 1.0f;
-        float outputHeight = 1.0f;
-        float pad0 = 0.0f;
-        float pad1 = 0.0f;
-    };
-
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11VertexShader> vertexShader;
-    ComPtr<ID3D11PixelShader> pixelShader;
-    ComPtr<ID3D11Buffer> constantBuffer;
-    ComPtr<ID3D11SamplerState> samplerState;
-    ComPtr<ID3D11ShaderResourceView> sourceTextureView;
-    QVector<SlotResources> slotResources;
     QStringList imagePaths;
     int currentImageIndex = -1;
     QImage currentImage;
 
-    bool initialize(int slotCount, QString *error)
-    {
-        if (!createD3D11Device(&device, &context, error)) {
-            return false;
-        }
-
-        static const char *kVertexShader = R"(
-struct VSOut
-{
-    float4 position : SV_POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-VSOut main(uint vertexId : SV_VertexID)
-{
-    float2 positions[3];
-    positions[0] = float2(-1.0, -1.0);
-    positions[1] = float2(-1.0, 3.0);
-    positions[2] = float2(3.0, -1.0);
-
-    VSOut output;
-    output.position = float4(positions[vertexId], 0.0, 1.0);
-    output.uv = float2(output.position.x * 0.5 + 0.5, 0.5 - output.position.y * 0.5);
-    return output;
-}
-)";
-
-        static const char *kPixelShader = R"(
-cbuffer RenderConstants : register(b0)
-{
-    float brightness;
-    float contrast;
-    float zoom;
-    float panX;
-    float panY;
-    float rotationRadians;
-    float flipX;
-    float flipY;
-    float timeValue;
-    uint heavyPassCount;
-    float outputWidth;
-    float outputHeight;
-    float pad0;
-    float pad1;
-};
-
-Texture2D sourceTexture : register(t0);
-SamplerState sourceSampler : register(s0);
-
-struct VSOut
-{
-    float4 position : SV_POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-float4 main(VSOut input) : SV_TARGET
-{
-    float2 centered = input.uv - float2(0.5, 0.5);
-    uint sourceWidthUint = 1;
-    uint sourceHeightUint = 1;
-    sourceTexture.GetDimensions(sourceWidthUint, sourceHeightUint);
-
-    float sourceWidth = max(float(sourceWidthUint), 1.0);
-    float sourceHeight = max(float(sourceHeightUint), 1.0);
-    float safeOutputWidth = max(outputWidth, 1.0);
-    float safeOutputHeight = max(outputHeight, 1.0);
-    float sourceAspect = sourceWidth / sourceHeight;
-    float outputAspect = safeOutputWidth / safeOutputHeight;
-
-    float2 fitHalfExtent = float2(0.5, 0.5);
-    if (sourceAspect > outputAspect) {
-        fitHalfExtent.y *= outputAspect / sourceAspect;
-    } else {
-        fitHalfExtent.x *= sourceAspect / outputAspect;
-    }
-
-    float2 p = centered / max(fitHalfExtent * 2.0, float2(1e-5, 1e-5));
-    p -= float2(panX, panY);
-    float s = sin(-rotationRadians);
-    float c = cos(-rotationRadians);
-    p = float2(c * p.x - s * p.y, s * p.x + c * p.y);
-
-    float safeZoom = max(zoom, 0.05);
-    p /= safeZoom;
-    p.x *= flipX;
-    p.y *= flipY;
-
-    float2 imageUv = p + float2(0.5, 0.5);
-    float2 clampedUv = saturate(imageUv);
-    float4 sampled = sourceTexture.Sample(sourceSampler, clampedUv);
-
-    float outside = step(imageUv.x, 0.0) + step(1.0, imageUv.x) + step(imageUv.y, 0.0) + step(1.0, imageUv.y);
-    float inBounds = outside > 0.0 ? 0.0 : 1.0;
-
-    float2 grid = p * float2(6.0, 6.0);
-    float checker = fmod(floor(grid.x) + floor(grid.y), 2.0);
-    float rings = 0.5 + 0.5 * cos(18.0 * length(p) - timeValue * 1.3);
-    float stripes = 0.5 + 0.5 * sin((p.x * 11.0 + p.y * 7.0) + timeValue);
-
-    float3 backdrop = lerp(float3(0.05, 0.06, 0.08), float3(0.16, 0.18, 0.22), checker * 0.35 + rings * 0.15);
-    backdrop += float3(stripes * 0.03, rings * 0.04, checker * 0.02);
-    float3 base = lerp(backdrop, sampled.rgb, inBounds);
-
-    float3 accum = base;
-    [loop]
-    for (uint i = 0; i < heavyPassCount; ++i)
-    {
-        float fi = float(i) + 1.0;
-        float wobble = sin(fi * 0.17 + p.x * (4.0 + fi * 0.02) + timeValue)
-                     * cos(fi * 0.11 + p.y * (5.0 + fi * 0.03) - timeValue * 0.7);
-        accum += float3(
-            wobble * 0.0025,
-            sin(wobble + fi * 0.09) * 0.0018,
-            cos(wobble - fi * 0.05) * 0.0015);
-        p += float2(wobble * 0.0004, -wobble * 0.0003);
-    }
-
-    float3 color = accum;
-    color = (color - 0.5) * contrast + (0.5 + brightness);
-    return float4(saturate(color), 1.0);
-}
-)";
-
-        ComPtr<ID3DBlob> vsBlob;
-        if (FAILED(compileShader(kVertexShader, "main", "vs_4_0", &vsBlob, error))) {
-            return false;
-        }
-
-        ComPtr<ID3DBlob> psBlob;
-        if (FAILED(compileShader(kPixelShader, "main", "ps_4_0", &psBlob, error))) {
-            return false;
-        }
-
-        HRESULT hr = device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vertexShader);
-        if (FAILED(hr) || !vertexShader) {
-            if (error) {
-                *error = QStringLiteral("CreateVertexShader failed: %1").arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        hr = device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &pixelShader);
-        if (FAILED(hr) || !pixelShader) {
-            if (error) {
-                *error = QStringLiteral("CreatePixelShader failed: %1").arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        D3D11_BUFFER_DESC bufferDesc = {};
-        bufferDesc.Usage = D3D11_USAGE_DYNAMIC;
-        bufferDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        bufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        bufferDesc.ByteWidth = alignConstantBufferByteWidth(UINT(sizeof(Constants)));
-        hr = device->CreateBuffer(&bufferDesc, nullptr, &constantBuffer);
-        if (FAILED(hr) || !constantBuffer) {
-            if (error) {
-                *error = QStringLiteral("CreateBuffer(constantBuffer) failed: %1").arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        D3D11_SAMPLER_DESC samplerDesc = {};
-        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-        hr = device->CreateSamplerState(&samplerDesc, &samplerState);
-        if (FAILED(hr) || !samplerState) {
-            if (error) {
-                *error = QStringLiteral("CreateSamplerState failed: %1").arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        slotResources.resize(slotCount);
-        return true;
-    }
+    bool publishActive = false;
+    bool shutdownRequested = false;
 
     QStringList collectImages(const QString &directoryPath) const
     {
@@ -403,64 +115,115 @@ float4 main(VSOut input) : SV_TARGET
         return !currentImage.isNull();
     }
 
-    bool uploadCurrentImage(QString *error)
+    bool initialize(D3D11NativeSlotPool *slotPool, const QSize &outputSize, QString *error)
     {
-        if (!device || !context || currentImage.isNull()) {
+        Q_UNUSED(outputSize);
+        glFormat = QSurfaceFormat::defaultFormat();
+
+        librarySurface = std::make_unique<QOffscreenSurface>();
+        librarySurface->setFormat(glFormat);
+        librarySurface->create();
+        if (!librarySurface->isValid()) {
             if (error) {
-                *error = QStringLiteral("No image is available for upload.");
+                *error = QStringLiteral("The algorithm library offscreen surface is invalid.");
             }
             return false;
         }
 
-        QImage image = currentImage.convertToFormat(QImage::Format_RGBA8888);
-        if (image.isNull()) {
+        libraryContext = std::make_unique<QOpenGLContext>();
+        libraryContext->setFormat(glFormat);
+        if (!libraryContext->create()) {
             if (error) {
-                *error = QStringLiteral("Current image could not be converted to RGBA8888.");
+                *error = QStringLiteral("The algorithm library OpenGL context could not be created.");
             }
             return false;
         }
 
-        D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = UINT(image.width());
-        desc.Height = UINT(image.height());
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_IMMUTABLE;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-        D3D11_SUBRESOURCE_DATA initialData = {};
-        initialData.pSysMem = image.constBits();
-        initialData.SysMemPitch = UINT(image.bytesPerLine());
-
-        ComPtr<ID3D11Texture2D> texture;
-        HRESULT hr = device->CreateTexture2D(&desc, &initialData, &texture);
-        if (FAILED(hr) || !texture) {
+        if (!libraryContext->makeCurrent(librarySurface.get())) {
             if (error) {
-                *error = QStringLiteral("CreateTexture2D(source image) failed: %1").arg(hresultToString(hr));
+                *error = QStringLiteral("The algorithm library OpenGL context could not be made current.");
             }
             return false;
         }
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = desc.Format;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MostDetailedMip = 0;
-        srvDesc.Texture2D.MipLevels = 1;
-
-        hr = device->CreateShaderResourceView(texture.Get(), &srvDesc, &sourceTextureView);
-        if (FAILED(hr) || !sourceTextureView) {
-            if (error) {
-                *error = QStringLiteral("CreateShaderResourceView(source image) failed: %1").arg(hresultToString(hr));
-            }
+        const bool initialized = libraryHost.initializeOnce(libraryContext.get(), error)
+            && publishBridge.initialize(libraryContext.get(), slotPool, error);
+        libraryContext->doneCurrent();
+        if (!initialized) {
             return false;
         }
 
+        session.reset();
+        session.latestParameters = {};
+        session.processingParameters = {};
+        session.hasLatestParameters = true;
         return true;
     }
 
-    bool loadImageDirectory(const QString &directoryPath, QString *error)
+    void destroySession()
+    {
+        if (session.handle == nullptr) {
+            session.reset();
+            return;
+        }
+
+        const bool hasGlTarget = libraryContext && librarySurface;
+        const bool madeCurrent = hasGlTarget && libraryContext->makeCurrent(librarySurface.get());
+        photo_editor_destroy(session.handle);
+        if (madeCurrent) {
+            libraryContext->doneCurrent();
+        }
+        session.reset();
+    }
+
+    bool rebuildSessionForCurrentImage(const QSize &outputSize, QString *error)
+    {
+        destroySession();
+        if (currentImage.isNull()) {
+            return true;
+        }
+        if (!libraryContext || !librarySurface) {
+            if (error) {
+                *error = QStringLiteral("The algorithm library context is not initialized.");
+            }
+            return false;
+        }
+
+        if (!libraryContext->makeCurrent(librarySurface.get())) {
+            if (error) {
+                *error = QStringLiteral("The algorithm library context could not be made current for session creation.");
+            }
+            return false;
+        }
+
+        session.handle = photo_editor_create(currentImage, error);
+        bool ok = session.handle != nullptr;
+        if (ok) {
+            ok = photo_editor_set_output_size(session.handle, sanitizedSize(outputSize), error);
+        }
+        libraryContext->doneCurrent();
+        if (!ok) {
+            if (session.handle != nullptr) {
+                if (libraryContext->makeCurrent(librarySurface.get())) {
+                    photo_editor_destroy(session.handle);
+                    libraryContext->doneCurrent();
+                }
+            }
+            session.reset();
+            return false;
+        }
+
+        session.latestParameters = {};
+        session.processingParameters = {};
+        session.hasLatestParameters = true;
+        session.parametersDirty = false;
+        session.processInFlight = false;
+        session.renderReady = false;
+        session.latestProgress = 0;
+        return true;
+    }
+
+    bool loadImageDirectory(const QString &directoryPath, const QSize &outputSize, QString *error)
     {
         const QStringList paths = collectImages(directoryPath);
         if (paths.isEmpty()) {
@@ -473,7 +236,6 @@ float4 main(VSOut input) : SV_TARGET
         imagePaths = paths;
         currentImageIndex = 0;
         currentImage = QImage(paths.first());
-        sourceTextureView.Reset();
         if (currentImage.isNull()) {
             if (error) {
                 *error = QStringLiteral("Failed to load the first image from the selected directory.");
@@ -481,10 +243,10 @@ float4 main(VSOut input) : SV_TARGET
             return false;
         }
 
-        return uploadCurrentImage(error);
+        return rebuildSessionForCurrentImage(outputSize, error);
     }
 
-    bool selectRelativeImage(int delta, QString *error)
+    bool selectRelativeImage(int delta, const QSize &outputSize, QString *error)
     {
         if (imagePaths.isEmpty()) {
             return false;
@@ -493,7 +255,6 @@ float4 main(VSOut input) : SV_TARGET
         const int count = imagePaths.size();
         currentImageIndex = (currentImageIndex + delta + count) % count;
         currentImage = QImage(imagePaths[currentImageIndex]);
-        sourceTextureView.Reset();
         if (currentImage.isNull()) {
             if (error) {
                 *error = QStringLiteral("Failed to load image: %1").arg(imagePaths[currentImageIndex]);
@@ -501,194 +262,187 @@ float4 main(VSOut input) : SV_TARGET
             return false;
         }
 
-        return uploadCurrentImage(error);
+        return rebuildSessionForCurrentImage(outputSize, error);
     }
 
-    bool ensureSlotResources(int slotIndex, const QSize &size, D3D11NativeSlotPool *slotPool, QString *error)
+    bool updateOutputSize(const QSize &outputSize, QString *error)
     {
-        if (slotIndex < 0 || slotIndex >= slotResources.size() || slotPool == nullptr) {
-            if (error) {
-                *error = QStringLiteral("Slot resource prerequisites are incomplete.");
-            }
-            return false;
-        }
-
-        SlotResources &slot = slotResources[slotIndex];
-        const QSize safeSize = sanitizedSize(size);
-        if (slot.texture && slot.size == safeSize && slot.sharedHandle != 0) {
+        if (session.handle == nullptr || !libraryContext || !librarySurface) {
             return true;
         }
 
-        slot.texture.Reset();
-        slot.rtv.Reset();
-        slot.keyedMutex.Reset();
-        slot.sharedHandle = 0;
-        slot.size = QSize();
-
-        D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = UINT(safeSize.width());
-        desc.Height = UINT(safeSize.height());
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-
-        HRESULT hr = device->CreateTexture2D(&desc, nullptr, &slot.texture);
-        if (FAILED(hr) || !slot.texture) {
+        if (!libraryContext->makeCurrent(librarySurface.get())) {
             if (error) {
-                *error = QStringLiteral("CreateTexture2D(slot %1) failed: %2").arg(slotIndex).arg(hresultToString(hr));
+                *error = QStringLiteral("The algorithm library context could not be made current for resize.");
             }
             return false;
         }
 
-        hr = device->CreateRenderTargetView(slot.texture.Get(), nullptr, &slot.rtv);
-        if (FAILED(hr) || !slot.rtv) {
-            if (error) {
-                *error = QStringLiteral("CreateRenderTargetView(slot %1) failed: %2").arg(slotIndex).arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        hr = slot.texture.As(&slot.keyedMutex);
-        if (FAILED(hr) || !slot.keyedMutex) {
-            if (error) {
-                *error = QStringLiteral("Query IDXGIKeyedMutex(slot %1) failed: %2").arg(slotIndex).arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        ComPtr<IDXGIResource> dxgiResource;
-        hr = slot.texture.As(&dxgiResource);
-        if (FAILED(hr) || !dxgiResource) {
-            if (error) {
-                *error = QStringLiteral("Query IDXGIResource(slot %1) failed: %2").arg(slotIndex).arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        HANDLE sharedHandle = nullptr;
-        hr = dxgiResource->GetSharedHandle(&sharedHandle);
-        if (FAILED(hr) || !sharedHandle) {
-            if (error) {
-                *error = QStringLiteral("GetSharedHandle(slot %1) failed: %2").arg(slotIndex).arg(hresultToString(hr));
-            }
-            return false;
-        }
-
-        slot.sharedHandle = quintptr(sharedHandle);
-        slot.size = safeSize;
-        ++slot.generation;
-        slotPool->updateSlot(slotIndex, slot.sharedHandle, slot.size, slot.generation);
-        return true;
+        const bool ok = photo_editor_set_output_size(session.handle, sanitizedSize(outputSize), error);
+        libraryContext->doneCurrent();
+        return ok;
     }
 
-    bool renderSlot(int slotIndex,
-                    const QSize &size,
-                    const ImageEffectParameters &parameters,
-                    quint64 frameIndex,
-                    QString *error)
+    bool startProcess(const ImageEffectParameters &parameters,
+                      const QSize &outputSize,
+                      QObject *callbackContext,
+                      void *callbackUserData,
+                      QString *error)
     {
-        if (slotIndex < 0 || slotIndex >= slotResources.size()) {
+        if (session.handle == nullptr) {
             if (error) {
-                *error = QStringLiteral("Render slot index is out of range.");
+                *error = QStringLiteral("No active image session exists.");
+            }
+            return false;
+        }
+        if (session.processInFlight || publishActive) {
+            if (error) {
+                *error = QStringLiteral("The session is still busy.");
+            }
+            return false;
+        }
+        if (!libraryContext || !librarySurface) {
+            if (error) {
+                *error = QStringLiteral("The algorithm library context is not initialized.");
             }
             return false;
         }
 
-        SlotResources &slot = slotResources[slotIndex];
-        if (!slot.keyedMutex || !slot.rtv) {
+        if (!libraryContext->makeCurrent(librarySurface.get())) {
             if (error) {
-                *error = QStringLiteral("Render slot resources are not initialized.");
+                *error = QStringLiteral("The algorithm library context could not be made current for process start.");
             }
             return false;
         }
 
-        for (;;) {
-            const HRESULT acquireHr = slot.keyedMutex->AcquireSync(0, 1);
-            if (SUCCEEDED(acquireHr)) {
-                break;
-            }
-            if (isAcquireTimeout(acquireHr)) {
-                QThread::msleep(1);
-                continue;
-            }
+        logWorkerMessage(QStringLiteral("[diag] startProcess begin ctx=%1 thread=%2 imageIndex=%3 output=%4x%5 %6")
+                             .arg(reinterpret_cast<quintptr>(libraryContext.get()), 0, 16)
+                             .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
+                             .arg(currentImageIndex)
+                             .arg(outputSize.width())
+                             .arg(outputSize.height())
+                             .arg(formatParameters(parameters)));
+
+        bool ok = photo_editor_set_output_size(session.handle, sanitizedSize(outputSize), error);
+        if (ok) {
+            ok = photo_editor_set_opcode(session.handle, parameters, error);
+        }
+        if (ok) {
+            ok = photo_editor_process(session.handle,
+                                      callbackContext,
+                                      &processProgressThunk,
+                                      callbackUserData,
+                                      error);
+        }
+        libraryContext->doneCurrent();
+
+        if (ok) {
+            session.processingParameters = parameters;
+            session.processInFlight = true;
+            session.renderReady = false;
+            session.latestProgress = 0;
+            logWorkerMessage(QStringLiteral("[diag] startProcess queued ctx=%1 processInFlight=%2 renderReady=%3")
+                                 .arg(reinterpret_cast<quintptr>(libraryContext.get()), 0, 16)
+                                 .arg(session.processInFlight)
+                                 .arg(session.renderReady));
+        } else {
+            logWorkerMessage(QStringLiteral("[diag] startProcess failed error=%1")
+                                 .arg(error ? *error : QString()));
+        }
+        return ok;
+    }
+
+    bool renderAndPublish(const QSize &outputSize,
+                          D3D11NativeSlotPool *slotPool,
+                          quint64 frameIndex,
+                          D3D11NativeFrame *frame,
+                          QString *error)
+    {
+        if (session.handle == nullptr || !session.renderReady) {
             if (error) {
-                *error = QStringLiteral("AcquireSync(slot %1, key 0) failed: %2")
-                             .arg(slotIndex)
-                             .arg(hresultToString(acquireHr));
+                *error = QStringLiteral("No completed algorithm result is ready for publish.");
             }
             return false;
         }
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        HRESULT hr = context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (FAILED(hr)) {
-            slot.keyedMutex->ReleaseSync(0);
+        int renderSlot = -1;
+        if (!slotPool->tryAcquireRenderSlot(&renderSlot)) {
+            return false;
+        }
+
+        publishActive = true;
+
+        if (!libraryContext || !librarySurface) {
+            slotPool->abandonRenderSlot(renderSlot);
+            publishActive = false;
             if (error) {
-                *error = QStringLiteral("Map(constantBuffer) failed: %1").arg(hresultToString(hr));
+                *error = QStringLiteral("The algorithm library context is not initialized.");
             }
             return false;
         }
 
-        Constants constants;
-        constants.brightness = parameters.brightness;
-        constants.contrast = parameters.contrast;
-        constants.zoom = qMax(0.05f, parameters.zoom);
-        constants.panX = parameters.panX * 0.65f;
-        constants.panY = parameters.panY * 0.65f;
-        constants.rotationRadians = qDegreesToRadians(parameters.rotationDegrees);
-        constants.flipX = parameters.flipHorizontal ? -1.0f : 1.0f;
-        constants.flipY = parameters.flipVertical ? -1.0f : 1.0f;
-        constants.timeValue = float(frameIndex) * 0.07f;
-        constants.heavyPassCount = unsigned(qBound(0, parameters.heavyGpuPassCount, 1024));
-        constants.outputWidth = float(size.width());
-        constants.outputHeight = float(size.height());
-        memcpy(mapped.pData, &constants, sizeof(constants));
-        context->Unmap(constantBuffer.Get(), 0);
-
-        ID3D11RenderTargetView *rtv = slot.rtv.Get();
-        const float clearColor[4] = {0.06f, 0.07f, 0.09f, 1.0f};
-        context->OMSetRenderTargets(1, &rtv, nullptr);
-        context->ClearRenderTargetView(rtv, clearColor);
-
-        D3D11_VIEWPORT viewport = {};
-        viewport.TopLeftX = 0.0f;
-        viewport.TopLeftY = 0.0f;
-        viewport.Width = float(size.width());
-        viewport.Height = float(size.height());
-        viewport.MinDepth = 0.0f;
-        viewport.MaxDepth = 1.0f;
-        context->RSSetViewports(1, &viewport);
-
-        context->IASetInputLayout(nullptr);
-        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        context->VSSetShader(vertexShader.Get(), nullptr, 0);
-        context->PSSetShader(pixelShader.Get(), nullptr, 0);
-        ID3D11Buffer *constantBuffers[] = { constantBuffer.Get() };
-        context->VSSetConstantBuffers(0, 1, constantBuffers);
-        context->PSSetConstantBuffers(0, 1, constantBuffers);
-        ID3D11ShaderResourceView *sourceViews[] = { sourceTextureView.Get() };
-        context->PSSetShaderResources(0, 1, sourceViews);
-        ID3D11SamplerState *samplers[] = { samplerState.Get() };
-        context->PSSetSamplers(0, 1, samplers);
-        context->Draw(3, 0);
-        ID3D11ShaderResourceView *nullViews[] = { nullptr };
-        context->PSSetShaderResources(0, 1, nullViews);
-        context->Flush();
-
-        hr = slot.keyedMutex->ReleaseSync(1);
-        if (FAILED(hr)) {
+        if (!libraryContext->makeCurrent(librarySurface.get())) {
+            slotPool->abandonRenderSlot(renderSlot);
+            publishActive = false;
             if (error) {
-                *error = QStringLiteral("ReleaseSync(slot %1, key 1) failed: %2")
-                             .arg(slotIndex)
-                             .arg(hresultToString(hr));
+                *error = QStringLiteral("The algorithm library context could not be made current for render.");
             }
             return false;
         }
 
+        logWorkerMessage(QStringLiteral("[diag] renderAndPublish begin frame=%1 slot=%2 ctx=%3 thread=%4 renderReady=%5 latestProgress=%6 output=%7x%8")
+                             .arg(frameIndex)
+                             .arg(renderSlot)
+                             .arg(reinterpret_cast<quintptr>(libraryContext.get()), 0, 16)
+                             .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
+                             .arg(session.renderReady)
+                             .arg(session.latestProgress)
+                             .arg(outputSize.width())
+                             .arg(outputSize.height()));
+
+        bool ok = photo_editor_set_output_size(session.handle, sanitizedSize(outputSize), error);
+        GLuint textureId = 0;
+        QSize textureSize;
+        if (ok) {
+            ok = photo_editor_render(session.handle, &textureId, &textureSize, error);
+            logWorkerMessage(QStringLiteral("[diag] photo_editor_render result ok=%1 textureId=%2 size=%3x%4 error=%5")
+                                 .arg(ok)
+                                 .arg(textureId)
+                                 .arg(textureSize.width())
+                                 .arg(textureSize.height())
+                                 .arg(error ? *error : QString()));
+        }
+        if (ok) {
+            logWorkerMessage(QStringLiteral("[diag] publishToSlot begin frame=%1 slot=%2 textureId=%3 size=%4x%5")
+                                 .arg(frameIndex)
+                                 .arg(renderSlot)
+                                 .arg(textureId)
+                                 .arg(textureSize.width())
+                                 .arg(textureSize.height()));
+            ok = publishBridge.publishToSlot(textureId, textureSize, renderSlot, error);
+            logWorkerMessage(QStringLiteral("[diag] publishToSlot end frame=%1 slot=%2 ok=%3 error=%4")
+                                 .arg(frameIndex)
+                                 .arg(renderSlot)
+                                 .arg(ok)
+                                 .arg(error ? *error : QString()));
+        }
+        libraryContext->doneCurrent();
+
+        if (!ok) {
+            slotPool->abandonRenderSlot(renderSlot);
+            publishActive = false;
+            return false;
+        }
+
+        if (!slotPool->submitRenderedFrame(renderSlot, frameIndex, frame)) {
+            slotPool->abandonRenderSlot(renderSlot);
+            publishActive = false;
+            return false;
+        }
+
+        session.renderReady = false;
+        session.latestProgress = 100;
+        publishActive = false;
         return true;
     }
 };
@@ -714,7 +468,7 @@ bool D3D11NativeWorker::initialize(D3D11NativeSlotPool *slotPool, QSize outputSi
     m_outputSize = sanitizedSize(outputSize);
 
     QString error;
-    if (!m_impl->initialize(slotPool->slotCount(), &error)) {
+    if (!m_impl->initialize(slotPool, m_outputSize, &error)) {
         emit initializationFailed(error);
         m_slotPool = nullptr;
         return false;
@@ -722,7 +476,7 @@ bool D3D11NativeWorker::initialize(D3D11NativeSlotPool *slotPool, QSize outputSi
 
     m_slotPool->reset();
     m_initialized = true;
-    logWorkerMessage(QStringLiteral("Initialized. Producer/consumer synchronization now uses shared textures + keyed mutex."));
+    logWorkerMessage(QStringLiteral("Initialized. Worker now uses a non-shared GLES2 algorithm context plus a publish bridge to shared D3D11 textures."));
     return true;
 }
 
@@ -737,9 +491,18 @@ void D3D11NativeWorker::setOutputSize(QSize size)
             changed = true;
         }
     }
-    if (changed) {
-        scheduleRender(0);
+
+    if (!changed || !m_initialized) {
+        return;
     }
+
+    QString error;
+    if (!m_impl->updateOutputSize(safeSize, &error)) {
+        emit initializationFailed(error);
+        return;
+    }
+
+    scheduleRender(0);
 }
 
 void D3D11NativeWorker::setEffectParameters(const ImageEffectParameters &parameters)
@@ -748,6 +511,14 @@ void D3D11NativeWorker::setEffectParameters(const ImageEffectParameters &paramet
         QMutexLocker locker(&m_stateMutex);
         m_effectParameters = parameters;
     }
+
+    m_impl->session.latestParameters = parameters;
+    m_impl->session.hasLatestParameters = true;
+    if (m_impl->session.processInFlight || m_impl->session.renderReady || m_impl->publishActive) {
+        m_impl->session.parametersDirty = true;
+        return;
+    }
+
     scheduleRender(0);
 }
 
@@ -765,12 +536,16 @@ void D3D11NativeWorker::loadImageDirectory(const QString &directoryPath)
 
     logWorkerMessage(QStringLiteral("Loading image directory: %1").arg(directoryPath));
     QString error;
-    const bool loaded = m_impl->loadImageDirectory(directoryPath, &error);
+    const bool loaded = m_impl->loadImageDirectory(directoryPath, currentOutputSize(), &error);
     if (!loaded) {
         logWorkerMessage(QStringLiteral("Image directory load failed: %1").arg(error));
         emit imageDirectoryLoadFinished(false, error, -1, 0, {}, {});
         return;
     }
+
+    m_impl->session.latestParameters = currentEffectParameters();
+    m_impl->session.hasLatestParameters = true;
+    m_impl->session.parametersDirty = false;
 
     logWorkerMessage(QStringLiteral("Loaded %1 images. Current=%2 size=%3x%4")
                          .arg(m_impl->imagePaths.size())
@@ -784,6 +559,7 @@ void D3D11NativeWorker::loadImageDirectory(const QString &directoryPath)
                                     m_impl->currentDisplayName(),
                                     m_impl->currentImage.size());
     emitImageSelection();
+    emit processingProgressChanged(0);
     scheduleRender(0);
 }
 
@@ -794,14 +570,18 @@ void D3D11NativeWorker::selectNextImage()
     }
 
     QString error;
-    if (!m_impl->selectRelativeImage(1, &error)) {
+    if (!m_impl->selectRelativeImage(1, currentOutputSize(), &error)) {
         if (!error.isEmpty()) {
             emit initializationFailed(error);
         }
         return;
     }
 
+    m_impl->session.latestParameters = currentEffectParameters();
+    m_impl->session.hasLatestParameters = true;
+    m_impl->session.parametersDirty = false;
     emitImageSelection();
+    emit processingProgressChanged(0);
     scheduleRender(0);
 }
 
@@ -812,14 +592,18 @@ void D3D11NativeWorker::selectPreviousImage()
     }
 
     QString error;
-    if (!m_impl->selectRelativeImage(-1, &error)) {
+    if (!m_impl->selectRelativeImage(-1, currentOutputSize(), &error)) {
         if (!error.isEmpty()) {
             emit initializationFailed(error);
         }
         return;
     }
 
+    m_impl->session.latestParameters = currentEffectParameters();
+    m_impl->session.hasLatestParameters = true;
+    m_impl->session.parametersDirty = false;
     emitImageSelection();
+    emit processingProgressChanged(0);
     scheduleRender(0);
 }
 
@@ -834,48 +618,62 @@ void D3D11NativeWorker::requestRender()
         return;
     }
 
-    int renderSlot = -1;
-    if (!m_slotPool->tryAcquireRenderSlot(&renderSlot)) {
-        scheduleRender(4);
-        return;
-    }
-
-    const QSize size = currentOutputSize();
-    QString error;
-    if (!m_impl->ensureSlotResources(renderSlot, size, m_slotPool, &error)) {
-        m_slotPool->abandonRenderSlot(renderSlot);
-        emit initializationFailed(error);
-        return;
-    }
-
-    const ImageEffectParameters parameters = [this]() {
-        QMutexLocker locker(&m_stateMutex);
-        return m_effectParameters;
-    }();
-
-    QElapsedTimer timer;
-    timer.start();
-    if (!m_impl->renderSlot(renderSlot, size, parameters, m_frameIndex, &error)) {
-        m_slotPool->abandonRenderSlot(renderSlot);
-        emit initializationFailed(error);
-        return;
-    }
-
-    D3D11NativeFrame frame;
-    if (!m_slotPool->submitRenderedFrame(renderSlot, m_frameIndex, &frame)) {
-        m_slotPool->abandonRenderSlot(renderSlot);
-        scheduleRender(4);
-        return;
-    }
-
-    logWorkerMessage(QStringLiteral("Rendered frame=%1 slot=%2 output=%3x%4 elapsedMs=%5")
+    logWorkerMessage(QStringLiteral("[diag] requestRender enter processInFlight=%1 renderReady=%2 publishActive=%3 frameIndex=%4 imageIndex=%5")
+                         .arg(m_impl->session.processInFlight)
+                         .arg(m_impl->session.renderReady)
+                         .arg(m_impl->publishActive)
                          .arg(m_frameIndex)
-                         .arg(frame.slotIndex)
-                         .arg(frame.size.width())
-                         .arg(frame.size.height())
-                         .arg(QString::number(double(timer.nsecsElapsed()) / 1000000.0, 'f', 2)));
-    emit frameReady(frame.slotIndex, frame.generation, frame.size, frame.frameIndex);
-    ++m_frameIndex;
+                         .arg(m_impl->currentImageIndex));
+
+    QString error;
+    if (m_impl->session.renderReady && !m_impl->publishActive) {
+        QElapsedTimer timer;
+        timer.start();
+        D3D11NativeFrame frame;
+        const bool published = m_impl->renderAndPublish(currentOutputSize(), m_slotPool, m_frameIndex, &frame, &error);
+        if (!published) {
+            if (error.isEmpty()) {
+                scheduleRender(4);
+                return;
+            }
+            emit initializationFailed(error);
+            return;
+        }
+
+        logWorkerMessage(QStringLiteral("Published frame=%1 slot=%2 output=%3x%4 elapsedMs=%5")
+                             .arg(m_frameIndex)
+                             .arg(frame.slotIndex)
+                             .arg(frame.size.width())
+                             .arg(frame.size.height())
+                             .arg(QString::number(double(timer.nsecsElapsed()) / 1000000.0, 'f', 2)));
+        emit frameReady(frame.slotIndex, frame.generation, frame.size, frame.frameIndex);
+        ++m_frameIndex;
+
+        if (m_impl->session.parametersDirty) {
+            m_impl->session.parametersDirty = false;
+            scheduleRender(0);
+        }
+        return;
+    }
+
+    if (m_impl->session.processInFlight || m_impl->publishActive) {
+        return;
+    }
+
+    if (!m_impl->session.hasLatestParameters) {
+        m_impl->session.latestParameters = currentEffectParameters();
+        m_impl->session.hasLatestParameters = true;
+    }
+
+    if (!m_impl->startProcess(m_impl->session.latestParameters,
+                              currentOutputSize(),
+                              this,
+                              this,
+                              &error)) {
+        if (!error.isEmpty()) {
+            emit initializationFailed(error);
+        }
+    }
 }
 
 void D3D11NativeWorker::shutdown()
@@ -883,6 +681,12 @@ void D3D11NativeWorker::shutdown()
     m_initialized = false;
     m_renderScheduled = false;
     m_frameIndex = 0;
+
+    if (m_impl) {
+        m_impl->shutdownRequested = true;
+        m_impl->destroySession();
+    }
+
     m_slotPool = nullptr;
     m_impl = std::make_unique<Impl>();
 }
@@ -906,6 +710,12 @@ QSize D3D11NativeWorker::currentOutputSize() const
     return sanitizedSize(m_outputSize);
 }
 
+ImageEffectParameters D3D11NativeWorker::currentEffectParameters() const
+{
+    QMutexLocker locker(&m_stateMutex);
+    return m_effectParameters;
+}
+
 void D3D11NativeWorker::scheduleRender(int delayMs)
 {
     QMutexLocker locker(&m_stateMutex);
@@ -915,4 +725,31 @@ void D3D11NativeWorker::scheduleRender(int delayMs)
 
     m_renderScheduled = true;
     QTimer::singleShot(qMax(0, delayMs), this, &D3D11NativeWorker::requestRender);
+}
+
+void D3D11NativeWorker::onProcessProgressEvent(int progress, bool isEnd)
+{
+    if (!m_initialized || m_impl->shutdownRequested) {
+        return;
+    }
+
+    logWorkerMessage(QStringLiteral("[diag] onProcessProgressEvent progress=%1 isEnd=%2 processInFlight(before)=%3 renderReady(before)=%4")
+                         .arg(progress)
+                         .arg(isEnd)
+                         .arg(m_impl->session.processInFlight)
+                         .arg(m_impl->session.renderReady));
+
+    m_impl->session.latestProgress = progress;
+    emit processingProgressChanged(progress);
+
+    if (!isEnd) {
+        return;
+    }
+
+    m_impl->session.processInFlight = false;
+    m_impl->session.renderReady = true;
+    logWorkerMessage(QStringLiteral("[diag] onProcessProgressEvent completed processInFlight(after)=%1 renderReady(after)=%2")
+                         .arg(m_impl->session.processInFlight)
+                         .arg(m_impl->session.renderReady));
+    scheduleRender(0);
 }
