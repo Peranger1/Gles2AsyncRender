@@ -22,11 +22,18 @@ constexpr GLfloat kVertices[] = {
      1.0f,  1.0f
 };
 
-constexpr GLfloat kTexCoords[] = {
+constexpr GLfloat kImportedTexCoords[] = {
     0.0f, 1.0f,
     1.0f, 1.0f,
     0.0f, 0.0f,
     1.0f, 0.0f
+};
+
+constexpr GLfloat kDisplayTexCoords[] = {
+    0.0f, 0.0f,
+    1.0f, 0.0f,
+    0.0f, 1.0f,
+    1.0f, 1.0f
 };
 
 std::array<GLfloat, 8> aspectFitVertices(const QSize &contentSize, const QSize &viewportSize)
@@ -71,23 +78,21 @@ D3D11ImportWidget::D3D11ImportWidget(QWidget *parent)
 {
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     connect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::notifyDisplayReadyForWorker, Qt::QueuedConnection);
-    connect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::onFrameSwapped, Qt::DirectConnection);
 }
 
 D3D11ImportWidget::~D3D11ImportWidget()
 {
     m_shuttingDown = true;
     disconnect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::notifyDisplayReadyForWorker);
-    disconnect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::onFrameSwapped);
-    logImportWidgetDiag(QStringLiteral("Destructor begin hasFrontFrame=%1 hasPendingFrame=%2 hasRetiringFrame=%3")
-                            .arg(m_hasFrontFrame)
-                            .arg(m_hasPendingFrame)
-                            .arg(m_hasRetiringFrame));
+    logImportWidgetDiag(QStringLiteral("Destructor begin hasDisplayFrame=%1 hasPendingFrame=%2")
+                            .arg(m_hasDisplayFrame)
+                            .arg(m_hasPendingFrame));
     if (context()) {
         makeCurrent();
         for (int i = 0; i < m_importedSlots.size(); ++i) {
             destroyImportedSlot(i);
         }
+        destroyDisplayTarget();
         doneCurrent();
     }
     logImportWidgetDiag(QStringLiteral("Destructor end"));
@@ -178,67 +183,39 @@ void D3D11ImportWidget::paintGL()
     glClear(GL_COLOR_BUFFER_BIT);
 
     if (m_hasPendingFrame && m_slotPool) {
-        int retiredSlot = -1;
-        D3D11NativeFrame promotedFrame;
-        if (m_slotPool->consumePendingFrame(m_pendingFrame.slotIndex, &retiredSlot, &promotedFrame)) {
-            m_frontFrame = promotedFrame;
-            m_hasFrontFrame = true;
-            if (retiredSlot != -1 && m_slotPool) {
-                D3D11NativeFrame retiringFrame;
-                if (m_slotPool->querySlot(retiredSlot, &retiringFrame)) {
-                    m_retiringFrame = retiringFrame;
-                    m_hasRetiringFrame = true;
-                } else {
-                    m_hasRetiringFrame = false;
-                }
-            } else {
-                m_hasRetiringFrame = false;
+        D3D11NativeFrame pendingFrame;
+        if (m_slotPool->consumePendingFrame(m_pendingFrame.slotIndex, &pendingFrame)) {
+            QString error;
+            const bool copied = copyFrameToDisplayTexture(pendingFrame, &error);
+            if (m_slotPool) {
+                m_slotPool->releasePendingSlot(pendingFrame.slotIndex);
             }
-            m_hasPendingFrame = false;
+            m_workerReadyPending = true;
+            emit slotAvailableForWorker();
+            if (!copied) {
+                logImportWidgetMessage(error);
+            } else {
+                m_displayFrame = pendingFrame;
+                m_hasDisplayFrame = true;
+            }
         }
+        m_hasPendingFrame = false;
     }
 
-    if (!m_hasFrontFrame) {
+    glViewport(0, 0, viewportSize.width(), viewportSize.height());
+
+    if (!m_hasDisplayFrame) {
         return;
-    }
-
-    QString error;
-    if (!ensureImportedSlot(m_frontFrame.slotIndex, &error)) {
-        logImportWidgetMessage(error);
-        return;
-    }
-
-    ImportedSlot &slot = m_importedSlots[m_frontFrame.slotIndex];
-    if (!slot.boundForRead) {
-        const HRESULT acquireHr = slot.keyedMutex->AcquireSync(1, 5000);
-        if (FAILED(acquireHr)) {
-            logImportWidgetMessage(QStringLiteral("AcquireSync(slot %1, key 1) failed: 0x%2")
-                                       .arg(m_frontFrame.slotIndex)
-                                       .arg(static_cast<unsigned int>(acquireHr), 0, 16));
-            return;
-        }
-
-        glBindTexture(GL_TEXTURE_2D, slot.textureId);
-        if (m_eglApi->bindTexImage(m_eglDisplay, slot.surface, EGL_BACK_BUFFER) != EGL_TRUE) {
-            glBindTexture(GL_TEXTURE_2D, 0);
-            slot.keyedMutex->ReleaseSync(0);
-            logImportWidgetMessage(QStringLiteral("eglBindTexImage(slot %1) failed with EGL error %2")
-                                       .arg(m_frontFrame.slotIndex)
-                                       .arg(QtAngleEglTools::eglErrorToString(m_eglApi->getError())));
-            return;
-        }
-        glBindTexture(GL_TEXTURE_2D, 0);
-        slot.boundForRead = true;
     }
 
     m_program.bind();
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, slot.textureId);
+    glBindTexture(GL_TEXTURE_2D, m_displayTextureId);
     glUniform1i(m_samplerLocation, 0);
-    const std::array<GLfloat, 8> vertices = aspectFitVertices(m_frontFrame.size, viewportSize);
+    const std::array<GLfloat, 8> vertices = aspectFitVertices(m_displayFrame.size, viewportSize);
     glVertexAttribPointer(m_positionLocation, 2, GL_FLOAT, GL_FALSE, 0, vertices.data());
     glEnableVertexAttribArray(m_positionLocation);
-    glVertexAttribPointer(m_texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, kTexCoords);
+    glVertexAttribPointer(m_texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, kDisplayTexCoords);
     glEnableVertexAttribArray(m_texCoordLocation);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glDisableVertexAttribArray(m_positionLocation);
@@ -277,23 +254,132 @@ void D3D11ImportWidget::notifyDisplayReadyForWorker()
     emit displayReadyForWorker();
 }
 
-void D3D11ImportWidget::onFrameSwapped()
+bool D3D11ImportWidget::ensureDisplayTarget(const QSize &size, QString *error)
 {
-    if (m_shuttingDown) {
-        return;
-    }
-
-    if (m_hasRetiringFrame) {
-        releaseImportedSlotReadback(m_retiringFrame.slotIndex);
-        if (m_slotPool) {
-            m_slotPool->releaseRetiredSlot(m_retiringFrame.slotIndex);
+    if (!size.isValid()) {
+        if (error) {
+            *error = QStringLiteral("The display target size is invalid.");
         }
-        m_hasRetiringFrame = false;
+        return false;
     }
 
-    if (m_hasPendingFrame) {
-        update();
+    if (m_displayTextureId != 0U && m_displayFramebufferId != 0U && m_displayTextureSize == size) {
+        return true;
     }
+
+    destroyDisplayTarget();
+
+    glGenTextures(1, &m_displayTextureId);
+    glBindTexture(GL_TEXTURE_2D, m_displayTextureId);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGBA,
+                 size.width(),
+                 size.height(),
+                 0,
+                 GL_RGBA,
+                 GL_UNSIGNED_BYTE,
+                 nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &m_displayFramebufferId);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_displayFramebufferId);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_displayTextureId, 0);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        if (error) {
+            *error = QStringLiteral("The UI display framebuffer is incomplete: 0x%1")
+                         .arg(unsigned(status), 0, 16);
+        }
+        destroyDisplayTarget();
+        return false;
+    }
+
+    m_displayTextureSize = size;
+    return true;
+}
+
+bool D3D11ImportWidget::copyFrameToDisplayTexture(const D3D11NativeFrame &frame, QString *error)
+{
+    if (!ensureImportedSlot(frame.slotIndex, error)) {
+        return false;
+    }
+    if (!ensureDisplayTarget(frame.size, error)) {
+        return false;
+    }
+
+    ImportedSlot &slot = m_importedSlots[frame.slotIndex];
+    const HRESULT acquireHr = slot.keyedMutex->AcquireSync(1, 5);
+    if (acquireHr != S_OK) {
+        if (error) {
+            *error = QStringLiteral("AcquireSync(slot %1, key 1) failed: 0x%2")
+                         .arg(frame.slotIndex)
+                         .arg(static_cast<unsigned int>(acquireHr), 0, 16);
+        }
+        return false;
+    }
+
+    bool ok = false;
+    glBindTexture(GL_TEXTURE_2D, slot.textureId);
+    if (m_eglApi->bindTexImage(m_eglDisplay, slot.surface, EGL_BACK_BUFFER) != EGL_TRUE) {
+        if (error) {
+            *error = QStringLiteral("eglBindTexImage(slot %1) failed with EGL error %2")
+                         .arg(frame.slotIndex)
+                         .arg(QtAngleEglTools::eglErrorToString(m_eglApi->getError()));
+        }
+    } else {
+        slot.boundForRead = true;
+        glBindFramebuffer(GL_FRAMEBUFFER, m_displayFramebufferId);
+        glViewport(0, 0, frame.size.width(), frame.size.height());
+        m_program.bind();
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, slot.textureId);
+        glUniform1i(m_samplerLocation, 0);
+        glVertexAttribPointer(m_positionLocation, 2, GL_FLOAT, GL_FALSE, 0, kVertices);
+        glEnableVertexAttribArray(m_positionLocation);
+        glVertexAttribPointer(m_texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, kImportedTexCoords);
+        glEnableVertexAttribArray(m_texCoordLocation);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisableVertexAttribArray(m_positionLocation);
+        glDisableVertexAttribArray(m_texCoordLocation);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        m_program.release();
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glFlush();
+        const GLenum glError = glGetError();
+        if (glError != GL_NO_ERROR) {
+            if (error) {
+                *error = QStringLiteral("UI copy-on-acquire draw failed with GL error 0x%1")
+                             .arg(unsigned(glError), 0, 16);
+            }
+        } else {
+            ok = true;
+        }
+    }
+
+    if (slot.boundForRead) {
+        if (m_eglApi->releaseTexImage(m_eglDisplay, slot.surface, EGL_BACK_BUFFER) != EGL_TRUE && error && ok) {
+            *error = QStringLiteral("eglReleaseTexImage(slot %1) failed with EGL error %2")
+                         .arg(frame.slotIndex)
+                         .arg(QtAngleEglTools::eglErrorToString(m_eglApi->getError()));
+            ok = false;
+        }
+        slot.boundForRead = false;
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    const HRESULT releaseHr = slot.keyedMutex->ReleaseSync(0);
+    if (FAILED(releaseHr) && error && ok) {
+        *error = QStringLiteral("ReleaseSync(slot %1, key 0) failed: 0x%2")
+                     .arg(frame.slotIndex)
+                     .arg(static_cast<unsigned int>(releaseHr), 0, 16);
+        ok = false;
+    }
+    return ok;
 }
 
 bool D3D11ImportWidget::createProgram(QString *error)
@@ -453,20 +539,15 @@ void D3D11ImportWidget::destroyImportedSlot(int slotIndex)
     slot.size = QSize();
 }
 
-void D3D11ImportWidget::releaseImportedSlotReadback(int slotIndex)
+void D3D11ImportWidget::destroyDisplayTarget()
 {
-    if (slotIndex < 0 || slotIndex >= m_importedSlots.size()) {
-        return;
+    if (m_displayFramebufferId != 0U) {
+        glDeleteFramebuffers(1, &m_displayFramebufferId);
+        m_displayFramebufferId = 0U;
     }
-
-    ImportedSlot &slot = m_importedSlots[slotIndex];
-    if (!slot.boundForRead) {
-        return;
+    if (m_displayTextureId != 0U) {
+        glDeleteTextures(1, &m_displayTextureId);
+        m_displayTextureId = 0U;
     }
-
-    makeCurrent();
-    m_eglApi->releaseTexImage(m_eglDisplay, slot.surface, EGL_BACK_BUFFER);
-    slot.boundForRead = false;
-    slot.keyedMutex->ReleaseSync(0);
-    doneCurrent();
+    m_displayTextureSize = QSize();
 }

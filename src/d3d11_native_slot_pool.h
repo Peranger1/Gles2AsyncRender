@@ -37,7 +37,6 @@ public:
             slot.frameIndex = 0;
         }
         m_pendingSlot = -1;
-        m_frontSlot = -1;
     }
 
     void updateSlot(int slotIndex, quintptr sharedHandle, const QSize &size, quint64 generation)
@@ -134,43 +133,27 @@ public:
         return true;
     }
 
-    bool consumePendingFrame(int slotIndex, int *retiredSlot, D3D11NativeFrame *frame)
+    bool consumePendingFrame(int slotIndex, D3D11NativeFrame *frame)
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || m_pendingSlot != slotIndex || frame == nullptr) {
             return false;
         }
 
-        Slot &nextFront = m_slots[slotIndex];
-        if (nextFront.state != SlotState::Pending) {
+        const Slot &slot = m_slots[slotIndex];
+        if (slot.state != SlotState::Pending) {
             return false;
         }
 
-        int oldFront = -1;
-        if (m_frontSlot != -1 && m_frontSlot != slotIndex) {
-            Slot &currentFront = m_slots[m_frontSlot];
-            if (currentFront.state == SlotState::Front) {
-                currentFront.state = SlotState::Retiring;
-                oldFront = m_frontSlot;
-            }
-        }
-
-        nextFront.state = SlotState::Front;
-        m_frontSlot = slotIndex;
-        m_pendingSlot = -1;
-
         frame->slotIndex = slotIndex;
-        frame->sharedHandle = nextFront.sharedHandle;
-        frame->size = nextFront.size;
-        frame->generation = nextFront.generation;
-        frame->frameIndex = nextFront.frameIndex;
-        if (retiredSlot) {
-            *retiredSlot = oldFront;
-        }
+        frame->sharedHandle = slot.sharedHandle;
+        frame->size = slot.size;
+        frame->generation = slot.generation;
+        frame->frameIndex = slot.frameIndex;
         return true;
     }
 
-    void releaseRetiredSlot(int slotIndex)
+    void releasePendingSlot(int slotIndex)
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex)) {
@@ -178,8 +161,9 @@ public:
         }
 
         Slot &slot = m_slots[slotIndex];
-        if (slot.state == SlotState::Retiring) {
+        if (slot.state == SlotState::Pending && m_pendingSlot == slotIndex) {
             slot.state = SlotState::Free;
+            m_pendingSlot = -1;
         }
     }
 
@@ -188,9 +172,7 @@ private:
     {
         Free,
         Rendering,
-        Pending,
-        Front,
-        Retiring
+        Pending
     };
 
     struct Slot final
@@ -210,5 +192,4 @@ private:
     mutable QMutex m_mutex;
     QVector<Slot> m_slots;
     int m_pendingSlot = -1;
-    int m_frontSlot = -1;
 };

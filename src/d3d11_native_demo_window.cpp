@@ -59,6 +59,9 @@ D3D11NativeDemoWindow::D3D11NativeDemoWindow(QWidget *parent)
     connect(m_displayWidget, &D3D11ImportWidget::displayReadyForWorker,
             this, &D3D11NativeDemoWindow::onDisplayReadyForWorker,
             Qt::QueuedConnection);
+    connect(m_displayWidget, &D3D11ImportWidget::slotAvailableForWorker,
+            m_worker, &D3D11NativeWorker::onSlotAvailableForWorker,
+            Qt::QueuedConnection);
     connect(m_displayWidget, &D3D11ImportWidget::outputSizeChanged,
             m_worker, &D3D11NativeWorker::setOutputSize,
             Qt::QueuedConnection);

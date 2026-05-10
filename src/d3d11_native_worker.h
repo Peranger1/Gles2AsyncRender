@@ -25,6 +25,7 @@ public slots:
     void selectNextImage();
     void selectPreviousImage();
     void requestRender();
+    void onSlotAvailableForWorker();
     void shutdown();
 
 signals:
@@ -58,6 +59,7 @@ private:
     bool m_initialized = false;
     bool m_renderScheduled = false;
     bool m_shuttingDown = false;
+    bool m_waitingForFreeSlot = false;
     quint64 m_frameIndex = 0;
     mutable QMutex m_stateMutex;
 };

@@ -7,6 +7,15 @@
 > 当前 `Qt 5.15.1 + ANGLE + GLES2 + QOpenGLWidget` 分支已经收敛到 D3D11 native shared texture 方案，默认无参主入口是 `D3D11NativeDemoWindow`。
 >
 > 旧的共享 `QOpenGLContext` worker 路径和阶段验证 harness 已经从主工程代码中移除。
+>
+> 2026-05-11 补充：
+>
+> - 当前实现已经进入第三阶段
+> - UI 侧采用 `copy-on-acquire`
+> - shared slot 在同一次 `paintGL()` 内归还
+> - worker 在无 free slot 时由 slot release 事件唤醒
+>
+> 下文若出现 `front / retiring / frameSwapped 回收` 等表述，应视为该方案的早期阶段设计，不代表当前最终代码行为。
 
 ## 当前实现状态
 
@@ -84,7 +93,7 @@
 4. worker Release
 5. display bridge 读取 ready slot
 6. UI 线程显示
-7. 旧 front slot 进入 retiring，等待回收
+7. 当前第三阶段中，UI 在 local copy 完成后立即释放该 slot；后续显示只依赖 UI 本地 `display texture`
 
 ## 5. 同步模型
 
@@ -113,14 +122,15 @@
 - `0` = worker 可写
 - `1` = display 可读
 
-当前实现采用的基线协议：
+当前第三阶段实现采用的基线协议：
 
 1. worker `AcquireSync(0)`
 2. worker 写纹理
 3. worker `ReleaseSync(1)`
-4. display 在该 slot 首次成为 `front` 时 `AcquireSync(1)`
-5. display 导入并在后续多个 `paintGL()` 周期内持续采样当前 `front`
-6. 只有当该 slot 从 `front` 退役为 `retiring` 后，display 才在后续一次 `frameSwapped()` 中 `ReleaseSync(0)`
+4. display 在消费 `pending` slot 的同一次 `paintGL()` 中 `AcquireSync(1)`
+5. display 导入该 shared texture，并复制到 UI 本地 `display texture`
+6. display 在同一次 `paintGL()` 中 `eglReleaseTexImage()` + `ReleaseSync(0)`
+7. shared slot 立即回到 `Free`
 
 ### 5.3 可选升级：D3D11 Fence
 
@@ -149,10 +159,10 @@
 - `state`
 - `lastProducedFrame`
 
-推荐状态机：
+当前第三阶段推荐状态机：
 
 ```text
-Free -> Writing -> Pending -> Displaying -> Retiring -> Free
+Free -> Writing -> Pending -> Free
 ```
 
 含义：
@@ -163,10 +173,8 @@ Free -> Writing -> Pending -> Displaying -> Retiring -> Free
   - worker 正在写
 - `Pending`
   - worker 已写完，等待 display 侧消费
-- `Displaying`
-  - 当前 front
-- `Retiring`
-  - 旧 front，等待显示完成后回收
+- 当前第三阶段中不再保留 `Displaying` / `Retiring`
+- 当前显示中的内容由 UI 本地 `display texture` 承担，而不是 shared slot 本身
 
 ## 7. 显示桥接策略
 
@@ -238,12 +246,12 @@ sequenceDiagram
     Worker-->>Bridge: slot ready
 
     UI->>Bridge: consume ready slot
-    Bridge->>Pool: AcquireSync(1) only when slot first becomes front
+    Bridge->>Pool: AcquireSync(1)
     Bridge->>Widget: import shared texture
-    Widget->>Widget: paintGL() repeatedly samples current front
-    Widget->>Widget: frameSwapped()
-    Bridge->>Pool: ReleaseSync(0) only for retiring old front
-    Bridge->>Pool: retire old front
+    Widget->>Widget: copy to local display texture
+    Bridge->>Pool: ReleaseSync(0)
+    Bridge->>Pool: pending -> free
+    Widget->>Widget: paintGL() samples local display texture
 ```
 
 ## 10. 风险

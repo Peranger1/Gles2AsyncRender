@@ -60,12 +60,12 @@
 - `src/d3d11_import_widget.*`
   - 当前默认显示侧 widget
   - 只负责把 D3D11 shared texture 导入 ANGLE/EGL，并在 `paintGL()` 中显示
-  - 持有 `front / pending / retiring` 显示提交状态
-  - 在 `paintGL()` 中提升 `pending`，当前 `front` 保持读侧 keyed mutex；只有旧 `front` 在 `frameSwapped()` 后才回收
+  - 持有 `pending` 元数据和 UI 本地 `display texture`
+  - 在 `paintGL()` 中对 shared slot 执行 `copy-on-acquire`，并在同一次 `paintGL()` 内释放 keyed mutex 与归还 slot
 
 - `src/d3d11_native_slot_pool.h`
-  - 管理 `free / rendering / pending / front / retiring` 的 slot 生命周期
-  - 保证 UI 不会读取正在写入的 slot，worker 也不会覆盖当前 front
+  - 管理 `free / rendering / pending` 的 slot 生命周期
+  - 保证 UI 不会读取正在写入的 slot，worker 也不会覆盖尚未消费完成的 pending slot
 
 - `src/d3d11_native_worker.*`
   - 当前默认生产者
@@ -84,15 +84,16 @@
 4. 用户导入图片目录后，worker 加载首张图片并上传 D3D11 源纹理
 5. worker 获取可用 render slot，并把处理结果写入当前 slot 对应的 shared texture
 6. worker 将新帧提交为 `pending`
-7. widget 在自己的显示时机把 `pending` 提升为 `front`，并在该 slot 首次成为 `front` 时导入共享纹理
-8. 旧 `front` 等到一次真实 `frameSwapped()` 后才释放读锁并回收
+7. widget 在自己的显示时机导入 `pending` 对应的 shared texture，并复制到 UI 本地 `display texture`
+8. widget 在同一次 `paintGL()` 内完成 `eglReleaseTexImage + ReleaseSync(0)`，随后立即归还该 slot
+9. 后续显示只采样 UI 本地 `display texture`
 
 这条路径的重点是：
 
 - UI 线程不参与 GPU 重计算
-- worker 不直接改写当前正在显示的 front texture
+- worker 不直接改写 UI 当前正在显示的本地 `display texture`
 - worker 不再通过共享 `QOpenGLContext` 与 UI 抢占同一条 ANGLE/GLES 执行路径
-- 显示侧不会在每次 `frameSwapped()` 对当前 `front` 执行阻塞释放
+- shared slot 不会跨多个显示周期保持读锁
 - resize 时不会批量重分配所有共享纹理
 
 需要明确的是：当前默认实现已经不是“两个 GLES 共享上下文 + 全局 GL 互斥锁”的模型，而是“D3D11 producer + ANGLE/QOpenGLWidget consumer + slot 生命周期保护”的模型。
@@ -133,28 +134,27 @@ sequenceDiagram
         Worker->>Pool: submitRenderedFrame(slot -> pending)
         Worker-->>Widget: QueuedConnection / frameReady(...)
     else 没有可用 slot
-        Worker->>Worker: 延迟重试
+        Worker->>Worker: 等待 UI 释放 slot 的事件唤醒
     end
 
     Widget->>Widget: onFrameReady() 仅记录 pending
     Widget->>GL: paintGL()
     Widget->>Pool: consumePendingFrame()
-    Widget->>Pool: pending -> front
-    Widget->>Pool: old front -> retiring
-    Widget->>GL: front 首次显示时 AcquireSync(1) + eglBindTexImage
-    Widget->>Widget: sample current front texture
-    Widget->>Widget: frameSwapped()
-    Widget->>GL: 仅对 old front / retiring 执行 releaseTexImage + ReleaseSync(0)
-    Widget->>Pool: releaseRetiredSlot(old front -> free)
+    Widget->>GL: AcquireSync(1) + eglBindTexImage
+    Widget->>GL: copy shared texture -> local display texture
+    Widget->>GL: eglReleaseTexImage + ReleaseSync(0)
+    Widget->>Pool: releasePendingSlot(pending -> free)
+    Widget-->>Worker: slotAvailableForWorker()
+    Widget->>Widget: sample local display texture
 ```
 
 ### 如何解读这张图
 
 - `QueuedConnection` 说明 UI 线程不会同步阻塞等待 worker 立即完成，这一层是异步的
-- `pending -> front -> retiring -> free` 说明显示提交和纹理复用是解耦的，worker 不会直接覆盖当前正在显示的纹理
+- `Free -> Rendering -> Pending -> Free` 说明 shared slot 只承担跨 runtime 传输职责，不再承担长期 front 显示职责
 - D3D11 keyed mutex 负责 producer/consumer 的资源交接
-- 当前 `front` 的读锁会跨多次 `paintGL()/frameSwapped()` 保持，直到它真的退役
-- `frameSwapped()` 现在只负责释放旧 `front / retiring`，不再每帧阻塞释放当前显示槽位
+- UI 对 shared slot 的持有只持续到本次 local copy 完成
+- `frameSwapped()` 不再承担 shared slot 回收职责
 - 因此当前默认工程更准确的描述应是“D3D11 producer / shared texture slot pool / ANGLE consumer 模型”
 - 旧的共享 GL worker 路径和阶段验证 harness 已经从主工程代码中移除
 

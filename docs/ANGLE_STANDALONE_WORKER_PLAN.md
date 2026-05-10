@@ -2,7 +2,15 @@
 
 > 2026-05-10
 >
-> 本文档描述的是下一阶段计划实施的 worker 渲染隔离方案。
+> 本文档最初描述的是下一阶段计划实施的 worker 渲染隔离方案。
+>
+> 2026-05-11 补充：
+>
+> - worker standalone runtime 已落地
+> - standalone GPU publish + CPU fallback 已落地
+> - 第三阶段 UI `copy-on-acquire`、slot 状态收敛、worker 事件唤醒 已落地
+>
+> 当前本文档应理解为“实施计划 + 已落地状态说明”。
 >
 > 目标不是继续在 worker 中复用 Qt 的 `QOpenGLContext`，而是：
 >
@@ -42,7 +50,7 @@
 
 推荐落地路径如下：
 
-1. UI 侧保持不变。
+1. 第一、二阶段 UI 侧尽量保持不变。
 2. worker 侧彻底不再创建 `QOpenGLContext`。
 3. worker 侧新增一个独立的 `AngleStandaloneRuntime`。
 4. `AngleStandaloneRuntime` 自己加载 Qt 当前进程已经加载的那一对 `libEGL[d].dll` / `libGLESv2[d].dll`。
@@ -63,6 +71,18 @@
 
 这是为了先把“崩溃原因隔离”和“上下文边界清理”做对，再考虑优化。
 
+第二阶段再做：
+
+- worker 侧 GPU import / `eglCreatePbufferFromClientBuffer`
+- worker 侧零拷贝 publish
+- 保留 CPU publish fallback
+
+第三阶段再做：
+
+- UI 侧 `copy-on-acquire`
+- shared slot 在同一次 `paintGL()` 内立即归还
+- worker 基于 slot release 事件唤醒，而不是 `scheduleRender(4)` 轮询
+
 ## 3. 设计目标
 
 本方案的目标是：
@@ -70,10 +90,11 @@
 - 让 worker 的 GLES/EGL 生命周期完全脱离 Qt 的 `QOpenGLContext`
 - 保证算法库看到的函数指针全部来自同一套 standalone runtime
 - 保证 worker 的 `EGLDisplay` 绑定到独立的 `ID3D11Device`
-- 保持 UI 侧 `D3D11ImportWidget` 显示链路不变
-- 保持 `D3D11NativeSlotPool` 和 shared texture 交接模型不变
+- 第一、二阶段保持 UI 侧 `D3D11ImportWidget` 显示链路尽量不变
+- 第一、二阶段保持 `D3D11NativeSlotPool` 和 shared texture 交接模型尽量不变
+- 第三阶段将 shared slot 从“持续显示中的 front 资源”收敛为“短生命周期传输缓冲”
 
-本方案明确不追求：
+第一阶段明确不追求：
 
 - 第一阶段实现 worker 侧零拷贝 publish
 - 修改 UI 侧显示架构
@@ -149,6 +170,17 @@ worker 侧调整为：
   - `D3D11StandalonePublishBridge`
   - 优先走 standalone runtime 内的 GPU publish
   - 如 GPU publish 初始化或运行失败，则回退到 CPU publish
+- 第三阶段：
+  - `D3D11ImportWidget`
+    - 对 shared slot 执行 `copy-on-acquire`
+    - 在同一次 `paintGL()` 中完成 `AcquireSync -> eglBindTexImage -> copy -> eglReleaseTexImage -> ReleaseSync`
+    - 后续显示只采样 UI 本地 display texture
+  - `D3D11NativeSlotPool`
+    - 状态从 `Free -> Rendering -> Pending -> Front -> Retiring -> Free`
+      收敛为 `Free -> Rendering -> Pending -> Free`
+  - `D3D11NativeWorker`
+    - 不再通过 `scheduleRender(4)` 轮询等待 free slot
+    - 改为由 UI 在 slot 释放后发信号唤醒 worker
 
 ## 6. 新增模块建议
 
@@ -406,7 +438,7 @@ worker 必须：
 
 这样会让问题边界再次混在一起。
 
-## 11. 第二阶段可选优化
+## 11. 第二阶段与第三阶段可选优化
 
 如果第一阶段稳定，再考虑第二阶段：
 
@@ -438,6 +470,75 @@ worker 必须：
 - UI 侧 import widget 重构
 - worker / UI 统一到同一 `EGLDisplay`
 - 去掉 CPU fallback
+
+### 11.2 第三阶段实施方向
+
+第三阶段的目标不是继续压榨 worker 侧 publish bridge，而是缩短 UI 对 shared slot 的占用窗口。
+
+当前第二阶段实现中，UI 侧会在首次读取 `front slot` 后持续持有 imported texture 与 keyed mutex，
+直到该 slot 退役并在 `frameSwapped()` 后才释放。
+
+这会带来两个问题：
+
+- shared slot 被长期占用，worker 可复用 slot 数下降
+- worker 在没有 free slot 时只能靠定时轮询重试
+
+第三阶段建议将 shared slot 的职责改为：
+
+- 只负责 worker 到 UI 的跨 runtime 传输
+- 不再承担“持续显示中的 front 纹理”职责
+
+第三阶段建议的 UI 侧路径如下：
+
+1. `onFrameReady()` 只记录 `pending slot` 元数据并调用 `update()`
+2. `paintGL()` 中检测到 `pending slot` 后：
+   - `ensureImportedSlot(slotIndex)`
+   - `AcquireSync(1, short_timeout)`
+   - `eglBindTexImage()`
+   - 将 imported shared texture 复制到 UI 自己的 `display texture` / `display FBO`
+   - `glFlush()`
+   - `eglReleaseTexImage()`
+   - `ReleaseSync(0)`
+   - 将该 slot 立即归还到 `Free`
+3. 后续显示路径只采样 UI 本地 `display texture`
+4. 如果本次没有新 `pending slot`，则继续显示上一帧的本地 `display texture`
+
+第三阶段建议的 slot pool 语义如下：
+
+- shared slot 不再保留 `Front` / `Retiring`
+- shared slot 状态收敛为：
+  - `Free`
+  - `Rendering`
+  - `Pending`
+- 生命周期收敛为：
+  - `Free -> Rendering -> Pending -> Free`
+
+这意味着：
+
+- worker publish 完成后，slot 进入 `Pending`
+- UI copy 成功并释放 keyed mutex 后，slot 立即回到 `Free`
+- `frameSwapped()` 不再承担 shared slot 回收职责
+
+第三阶段建议的 worker 唤醒方式如下：
+
+- 当 worker 因无 free slot 而无法继续 publish 时，不再使用 `scheduleRender(4)` 轮询
+- UI 在成功完成 local copy 并释放 slot 后，发出类似 `slotAvailableForWorker()` 的信号
+- worker 收到该信号后：
+  - 若当前正等待 free slot
+  - 且已有 `renderReady` 结果
+  - 则立即 `scheduleRender(0)` 继续 publish
+
+第三阶段的收益是：
+
+- shared slot 占用时间从“一个显示周期”缩短到“一次 copy pass”
+- worker 吞吐不再直接受 `frameSwapped()` 节奏约束
+- slot pool 的状态机与资源职责更加一致
+
+第三阶段当前仍不建议做：
+
+- worker / UI 合并到同一个 `EGLDisplay`
+- 去掉 keyed mutex
+- 在第三阶段同时引入新的跨进程或跨 API fence 协议
 
 ## 12. 验收标准
 
@@ -506,6 +607,22 @@ worker 必须：
   - 日志会明确打印 fallback 原因
 - 当前仍保留 CPU fallback 作为正式兜底能力
 
+### 12.4 第三阶段验证重点
+
+第三阶段开始后，最小验证重点建议调整为：
+
+- UI 在消费 `pending slot` 的同一次 `paintGL()` 中完成：
+  - `AcquireSync`
+  - `eglBindTexImage`
+  - local copy
+  - `eglReleaseTexImage`
+  - `ReleaseSync`
+- shared slot 不再跨多个显示周期保持 `front` 占用
+- worker 在无 free slot 时不再通过 `scheduleRender(4)` 轮询重试
+- UI 成功归还 slot 后，worker 能被事件直接唤醒并继续 publish
+- 即使 `frameSwapped()` 节奏偏慢，worker 吞吐也不再被其直接卡住
+- 当某次 local copy 失败时，UI 仍能继续显示上一帧本地 `display texture`
+
 ## 13. 风险与注意事项
 
 ### 13.1 不能显式链接另一份 EGL/GLES
@@ -552,5 +669,6 @@ worker 不应在工程里直接链接另一份 `libEGL/libGLESv2` import lib。
 4. 再切 `D3D11NativeWorker`
 5. 第一阶段先把 publish bridge 收敛为 CPU publish
 6. 第二阶段再把 publish bridge 切到 standalone GPU publish，并保留 CPU fallback
+7. 第三阶段再做 UI `copy-on-acquire`、slot pool 状态收敛、worker 事件驱动唤醒
 
 这样每一步都有清晰回归边界，便于快速确认问题是否真正被隔离。

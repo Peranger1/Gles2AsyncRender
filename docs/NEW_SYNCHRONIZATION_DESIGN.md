@@ -2,7 +2,7 @@
 
 > 2026-05-10 状态更新
 >
-> 本文档描述的是目标设计，不再代表当前 `Qt 5.15.1 + ANGLE + GLES2 + QOpenGLWidget` 分支上的已验证稳定实现。
+> 本文档描述的是历史目标设计，不再代表当前 `Qt 5.15.1 + ANGLE + GLES2 + QOpenGLWidget` 分支上的已验证稳定实现。
 >
 > 当前分支在实际运行中已经证明：
 >
@@ -10,7 +10,9 @@
 > - 当前主分支已经进一步收敛到 D3D11 native shared texture 主路径
 > - `QOpenGLWidget` 现在只负责通过 ANGLE/EGL import bridge 显示 shared texture，而不是与 worker 共享 GLES 渲染主路径
 >
-> 如果后续要继续推进本文方案，需要先切换运行时基础，例如更换后端或直接转向 D3D11 原生共享纹理同步。
+> 当前主分支已经继续前进到 standalone worker + D3D11 native shared texture + UI `copy-on-acquire` 路线。
+>
+> 因此本文应视为历史方案记录，而不是当前代码结构说明。
 
 ## 1. 目的
 

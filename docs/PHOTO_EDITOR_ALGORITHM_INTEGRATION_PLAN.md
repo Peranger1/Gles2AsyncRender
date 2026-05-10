@@ -8,7 +8,7 @@
 >
 > - UI 线程继续使用 `D3D11ImportWidget`
 > - UI 线程继续只消费项目自己的 shared texture
-> - `D3D11NativeSlotPool` 继续管理 `free / rendering / pending / front / retiring`
+> - `D3D11NativeSlotPool` 当前管理 `free / rendering / pending`
 >
 > 当前没有现成的算法库文件和头文件，因此本文中的 `photo_editor_*` 仅是项目内模拟实现契约。
 >
@@ -60,7 +60,7 @@
 
 - UI 线程继续使用 `D3D11ImportWidget`
 - UI 线程继续只负责显示 shared texture
-- `D3D11NativeSlotPool` 继续负责 `free / rendering / pending / front / retiring`
+- `D3D11NativeSlotPool` 当前继续负责 `free / rendering / pending`
 - UI / worker 之间的跨线程资源交接继续使用 D3D11 shared texture + keyed mutex
 
 需要变化的只有 worker 内部和算法库接入边界：
@@ -331,7 +331,7 @@ worker 线程收到回调事件后的处理规则：
 2. worker 从 `slotPool->tryAcquireRenderSlot()` 获取一个 `Free` slot
 3. 如果没有可用 slot
    - 保持 `renderReady = true`
-   - 延迟重试
+   - 等待 UI 在 local copy 完成后发来的 slot release 唤醒事件
    - 不重新调用 `photo_editor_process`
 4. 一旦拿到 slot：
    - worker 切回算法库 context 并 `makeCurrent()`
@@ -380,7 +380,7 @@ worker 线程收到回调事件后的处理规则：
 
 - `D3D11ImportWidget`
 - `D3D11NativeSlotPool`
-- 当前 `front / pending / retiring / free` 协议
+- 当前 `free / rendering / pending / free` shared slot 协议，以及 UI 本地 `display texture` 显示模型
 - 当前 UI 控件层
 - 当前 D3D11 shared texture + keyed mutex 显示链路
 

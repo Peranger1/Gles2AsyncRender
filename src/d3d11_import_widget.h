@@ -32,6 +32,7 @@ public:
 signals:
     void glInitialized();
     void displayReadyForWorker();
+    void slotAvailableForWorker();
     void outputSizeChanged(QSize size);
 
 public slots:
@@ -44,7 +45,6 @@ protected:
 
 private slots:
     void notifyDisplayReadyForWorker();
-    void onFrameSwapped();
 
 private:
     struct ImportedSlot final
@@ -59,9 +59,11 @@ private:
     };
 
     bool createProgram(QString *error);
+    bool ensureDisplayTarget(const QSize &size, QString *error);
+    bool copyFrameToDisplayTexture(const D3D11NativeFrame &frame, QString *error);
     bool ensureImportedSlot(int slotIndex, QString *error);
     void destroyImportedSlot(int slotIndex);
-    void releaseImportedSlotReadback(int slotIndex);
+    void destroyDisplayTarget();
 
     QOpenGLShaderProgram m_program;
     int m_positionLocation = -1;
@@ -73,12 +75,13 @@ private:
     EGLConfig m_eglConfig = nullptr;
     QVector<ImportedSlot> m_importedSlots;
     std::unique_ptr<QtAngleEglTools::ResolvedEglApi> m_ownedEglApi;
+    GLuint m_displayTextureId = 0;
+    GLuint m_displayFramebufferId = 0;
+    QSize m_displayTextureSize;
     D3D11NativeFrame m_pendingFrame;
     bool m_hasPendingFrame = false;
-    D3D11NativeFrame m_frontFrame;
-    bool m_hasFrontFrame = false;
-    D3D11NativeFrame m_retiringFrame;
-    bool m_hasRetiringFrame = false;
+    D3D11NativeFrame m_displayFrame;
+    bool m_hasDisplayFrame = false;
     bool m_workerReadyPending = false;
     bool m_shuttingDown = false;
 };

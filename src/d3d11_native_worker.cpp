@@ -669,13 +669,16 @@ void D3D11NativeWorker::requestRender()
         const bool published = m_impl->renderAndPublish(currentOutputSize(), m_slotPool, m_frameIndex, &frame, &error);
         if (!published) {
             if (error.isEmpty()) {
-                scheduleRender(4);
+                m_waitingForFreeSlot = true;
+                logWorkerDiag(QStringLiteral("[diag] requestRender publish deferred waitingForFreeSlot=1 frameIndex=%1")
+                                     .arg(m_frameIndex));
                 return;
             }
             emit initializationFailed(error);
             return;
         }
 
+        m_waitingForFreeSlot = false;
         logWorkerMessage(QStringLiteral("Published frame=%1 slot=%2 output=%3x%4 elapsedMs=%5")
                              .arg(m_frameIndex)
                              .arg(frame.slotIndex)
@@ -724,6 +727,7 @@ void D3D11NativeWorker::shutdown()
                          .arg(m_frameIndex));
     m_initialized = false;
     m_renderScheduled = false;
+    m_waitingForFreeSlot = false;
     m_frameIndex = 0;
 
     if (m_impl) {
@@ -771,6 +775,18 @@ void D3D11NativeWorker::scheduleRender(int delayMs)
 
     m_renderScheduled = true;
     QTimer::singleShot(qMax(0, delayMs), this, &D3D11NativeWorker::requestRender);
+}
+
+void D3D11NativeWorker::onSlotAvailableForWorker()
+{
+    if (!m_initialized || m_shuttingDown || !m_waitingForFreeSlot) {
+        return;
+    }
+
+    logWorkerDiag(QStringLiteral("[diag] onSlotAvailableForWorker waking publish path frameIndex=%1")
+                         .arg(m_frameIndex));
+    m_waitingForFreeSlot = false;
+    scheduleRender(0);
 }
 
 void D3D11NativeWorker::onProcessProgressEvent(int progress, bool isEnd)

@@ -22,7 +22,7 @@
 - worker 线程独占 D3D11 device / immediate context
 - worker 直接写入 shared texture
 - widget 通过 ANGLE/EGL import bridge 消费 shared texture
-- front / pending / retiring / free 由 slot 生命周期协议管理
+- shared slot 生命周期已经收敛为 `free / rendering / pending / free`
 
 ## 当前状态
 
@@ -52,8 +52,8 @@
 目前代码已经为这两类问题引入了新的收敛路径：
 
 - worker 启动延后到首帧 `frameSwapped()` 之后
-- 显示侧改为 `front / pending / retiring / free` 槽位协议
-- worker 侧改为只对当前 render slot 做纹理重分配，避免 resize 时破坏正在显示的 front texture
+- 当时显示侧改为 `front / pending / retiring / free` 槽位协议
+- 当时 worker 侧改为只对当前 render slot 做纹理重分配，避免 resize 时破坏正在显示的 front texture
 
 到了 `2026-04-26` 晚些时候，样例又从“最小共享纹理验证程序”演进成了一个更接近真实接入方式的图像处理 demo：
 
@@ -367,7 +367,7 @@
 
 采取的修正：
 
-- 保留 `front / pending / retiring / free` 提交协议
+- 当时保留 `front / pending / retiring / free` 提交协议
 - 但把纹理分配策略改为：
   - 只对当前 render slot 单独重分配
   - 不再在 resize 时批量重分配所有共享纹理
@@ -451,7 +451,7 @@
 结果：
 
 - worker 第一次请求渲染时就能拿到有效 render slot
-- 目录加载完成后，首帧可以真正进入 `pending -> front` 提交流程
+- 在当时的实现中，目录加载完成后，首帧可以真正进入 `pending -> front` 提交流程
 - 这说明“不显示”问题来自槽位注册顺序，而不是共享上下文或 shader/FBO 本身失效
 
 ### 13. 图像显示方式从“强制铺满”收敛为“按宽高比显示”
@@ -507,20 +507,21 @@
 
 - `src/d3d11_import_widget.cpp`
   - 持有显示侧 `QOpenGLWidget`
-  - 持有显示侧 `front / pending / retiring` 状态
-  - 在 `paintGL()` 中提升新的 `front`
-  - 当前 `front` 会保持读侧 keyed mutex，只有旧 `front` 在 `frameSwapped()` 后才真正释放
+  - 持有待消费的 `pending` 元数据和 UI 本地 `display texture`
+  - 在 `paintGL()` 中对 shared slot 执行 `copy-on-acquire`
+  - 在同一次 `paintGL()` 内完成 `AcquireSync -> eglBindTexImage -> copy -> eglReleaseTexImage -> ReleaseSync`
+  - local copy 成功后立即归还 pending slot
 
 - `src/d3d11_native_worker.cpp`
   - 作为 worker object 被移动到独立 `QThread`
   - 独占 D3D11 device / immediate context
   - 负责图片目录加载、源图上传、图像效果 shader 和 shared texture 输出
   - 只对当前 render slot 分配、重建并渲染
-  - 把新帧先提交为 pending，再交给 widget 提升为 front
+  - 把新帧先提交为 pending；若没有 free slot，则等待 UI 释放 slot 的事件唤醒
 
 - `src/d3d11_native_slot_pool.h`
   - 定义共享纹理槽位池
-  - 显式管理 `free / rendering / pending / front / retiring` 状态
+  - 当前显式管理 `free / rendering / pending` 状态
 
 - `src/angle_threading.cpp`
   - 探测 Qt 暴露的 EGL native handle
@@ -616,9 +617,9 @@
 
 - worker 只能渲染到当前拿到的 render slot
 - 新帧只能先提交成 `pending`
-- UI 只能在自己的显示时机把 `pending` 升格为新的 `front`
-- 旧 `front` 只能在一次真正的 `frameSwapped()` 之后回收
-- resize 时只能重分配当前 render slot，不能重分配正在显示的 `front`
+- UI 只能在自己的显示时机消费 `pending`，复制到本地 `display texture` 后立即归还 slot
+- shared slot 不再跨多个显示周期承担当前显示 front 的职责
+- resize 时只能重分配当前 render slot，不能重分配 worker 正在写入或 UI 正在消费的 shared slot
 
 ## 已记录下来的关键现象
 
@@ -640,7 +641,7 @@
 - `nativeResourceForIntegration("egldisplay")` 返回空
 - `nativeResourceForWindow("egldisplay")` 被 `QWindowsNativeInterface` 拒绝
 - 在改为从 Qt 已加载的 `libEGLd.dll` 解析 EGL 函数并启用 `ID3D11Multithread` 后，最终验证运行成功
-- 在引入显式 front/pending/retiring 协议并把纹理重分配收紧为“只作用于当前 render slot”后，代码路径已经对准 live resize 伪影的真正根因
+- 在早期引入显式 front/pending/retiring 协议并把纹理重分配收紧为“只作用于当前 render slot”后，代码路径已经对准了 live resize 伪影的真正根因；当前第三阶段则进一步收敛为 UI `copy-on-acquire` + `free/rendering/pending/free`
 
 这些现象强烈说明：主要矛盾并不是样例里的 shader、FBO 或纹理显示代码，而是这一特定 Qt/Windows/OpenGLES 组合下 ANGLE 后端的线程行为。
 
