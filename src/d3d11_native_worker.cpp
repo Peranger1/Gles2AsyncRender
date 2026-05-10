@@ -1,8 +1,8 @@
 #include "d3d11_native_worker.h"
 
 #include "angle_standalone_runtime.h"
-#include "d3d11_cpu_publish_bridge.h"
 #include "d3d11_native_slot_pool.h"
+#include "d3d11_standalone_publish_bridge.h"
 #include "photo_editor_gles2_simulator.h"
 #include "photo_editor_library_host.h"
 #include "photo_editor_session.h"
@@ -70,7 +70,7 @@ struct D3D11NativeWorker::Impl final
 {
     std::unique_ptr<AngleStandaloneRuntime> algorithmRuntime;
     PhotoEditorLibraryHost libraryHost;
-    D3D11CpuPublishBridge publishBridge;
+    D3D11StandalonePublishBridge publishBridge;
     PhotoEditorSession session;
 
     QStringList imagePaths;
@@ -495,7 +495,7 @@ bool D3D11NativeWorker::initialize(D3D11NativeSlotPool *slotPool, QSize outputSi
     m_slotPool->reset();
     m_initialized = true;
     m_shuttingDown = false;
-    logWorkerMessage(QStringLiteral("Initialized. Worker now uses a standalone ANGLE runtime and a CPU publish bridge to shared D3D11 textures."));
+    logWorkerMessage(QStringLiteral("Initialized. Worker now uses a standalone ANGLE runtime and a standalone publish bridge to shared D3D11 textures."));
     return true;
 }
 

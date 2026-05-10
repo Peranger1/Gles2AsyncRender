@@ -21,9 +21,9 @@
 
 但当前 worker 仍然存在一个关键问题：
 
-- `D3D11NativeWorker` 内部仍然创建了 `QOffscreenSurface + QOpenGLContext`
-- `PhotoEditorLibraryHost` 仍然通过 `QOpenGLContext::getProcAddress()` 向算法库提供函数入口
-- `AngleSharedTexturePublishBridge` 仍然要求 `libraryContext` current
+- 历史路径中，`D3D11NativeWorker` 内部仍然创建了 `QOffscreenSurface + QOpenGLContext`
+- 历史路径中，`PhotoEditorLibraryHost` 仍然通过 `QOpenGLContext::getProcAddress()` 向算法库提供函数入口
+- 历史路径中，`AngleSharedTexturePublishBridge` 仍然要求 `libraryContext` current
 
 这意味着：
 
@@ -85,10 +85,10 @@
 
 当前 worker 路径的关键事实：
 
-- `D3D11NativeWorker` 仍持有 `librarySurface` 和 `libraryContext`
-- `PhotoEditorLibraryHost` 的 resolver 仍来自 `QOpenGLContext::currentContext()`
-- `photo_editor_*` 模拟实现内部仍使用 `QOpenGLFunctions`
-- `AngleSharedTexturePublishBridge` 仍基于 `QOpenGLContext`
+- 历史路径中，`D3D11NativeWorker` 仍持有 `librarySurface` 和 `libraryContext`
+- 历史路径中，`PhotoEditorLibraryHost` 的 resolver 仍来自 `QOpenGLContext::currentContext()`
+- 历史路径中，`photo_editor_*` 模拟实现内部仍使用 `QOpenGLFunctions`
+- 历史路径中，`AngleSharedTexturePublishBridge` 仍基于 `QOpenGLContext`
 
 因此当前真实边界并不是“worker 独立 runtime”，而是“worker 使用另一个 Qt GL context”。
 
@@ -140,10 +140,15 @@ worker 侧调整为：
 - `photo_editor_*`
   - 不再使用 Qt GL 抽象
   - 只使用 standalone proc table
-- `D3D11CpuPublishBridge`
+- 第一阶段：
+  - `D3D11CpuPublishBridge`
   - 只保留 CPU publish
   - 从 standalone runtime 的当前 context 执行 `glReadPixels`
   - 用独立 D3D11 device 的 immediate context 执行 `UpdateSubresource`
+- 第二阶段：
+  - `D3D11StandalonePublishBridge`
+  - 优先走 standalone runtime 内的 GPU publish
+  - 如 GPU publish 初始化或运行失败，则回退到 CPU publish
 
 ## 6. 新增模块建议
 
@@ -216,7 +221,7 @@ worker 侧调整为：
   1. 创建 `AngleStandaloneRuntime`
   2. 初始化 runtime
   3. `PhotoEditorLibraryHost::initializeOnce(runtime, ...)`
-  4. 初始化 CPU publish bridge
+  4. 初始化 standalone publish bridge
   5. 进入正常 worker 生命周期
 
 ### 7.2 `src/photo_editor_library_host.h/.cpp`
@@ -260,7 +265,7 @@ worker 侧调整为：
   - draw
   - `glReadPixels`
 
-### 7.4 `src/angle_shared_texture_publish_bridge.*`
+### 7.4 第一阶段 publish bridge
 
 第一阶段建议不要保留这个名字和 GPU import 分支。
 
@@ -282,6 +287,24 @@ worker 侧调整为：
 - `eglQuerySurfacePointerANGLE`
 - worker 侧 `eglBindTexImage`
 - worker 侧 imported-slot GPU publish
+
+### 7.5 第二阶段 publish bridge
+
+第二阶段在第一阶段稳定后，将 publish bridge 继续收口为：
+
+- `src/d3d11_standalone_publish_bridge.h/.cpp`
+
+职责调整为：
+
+- 接收算法库输出的 `textureId + size`
+- 优先在 standalone runtime 当前 context 下执行 GPU publish：
+  - `eglCreatePbufferFromClientBuffer`
+  - `eglBindTexImage`
+  - FBO copy pass
+  - `eglReleaseTexImage`
+- 若 standalone ANGLE D3D texture import 路径不可用或运行失败：
+  - 回退到 `glReadPixels + UpdateSubresource` 的 CPU publish
+- keyed mutex 继续交给 UI 侧消费
 
 ## 8. 函数指针一致性保证
 
@@ -397,6 +420,25 @@ worker 必须：
 - 所有算法库渲染和资源释放路径都不再依赖 Qt context
 - worker 与 UI 的 `ID3D11Device` 已明确分离
 
+### 11.1 当前第二阶段实施方向
+
+当前第二阶段开始后的收口目标调整为：
+
+- worker publish bridge 改为 `D3D11StandalonePublishBridge`
+- 优先走 standalone runtime 内的 GPU publish：
+  - `eglCreatePbufferFromClientBuffer`
+  - `eglBindTexImage`
+  - FBO copy pass
+  - `eglReleaseTexImage`
+- 保持 `D3D11NativeSlotPool`、shared handle、keyed mutex、UI import widget 不变
+- 如 standalone runtime 上的 ANGLE D3D texture import 失败，则允许回退到 CPU publish 兜底
+
+第二阶段当前不做：
+
+- UI 侧 import widget 重构
+- worker / UI 统一到同一 `EGLDisplay`
+- 去掉 CPU fallback
+
 ## 12. 验收标准
 
 第一阶段完成后，应满足：
@@ -412,7 +454,7 @@ worker 必须：
 
 ### 12.1 当前第一阶段收口状态
 
-截至 2026-05-10，第一阶段收口后的当前实现约束如下：
+截至 2026-05-10，第一阶段收口后的历史实现约束如下：
 
 - worker 侧仅保留 `AngleStandaloneRuntime + D3D11CpuPublishBridge`
 - 仓库内不再保留旧的 `AngleSharedTexturePublishBridge` Qt-context publish 路线
@@ -432,6 +474,37 @@ worker 必须：
 - 连续拖动 brightness / contrast / zoom
 - 窗口 resize
 - 关闭窗口
+
+### 12.2 当前第二阶段验证重点
+
+第二阶段开始后，最小验证重点调整为：
+
+- worker 是否成功打印 standalone publish bridge 的初始模式、初始路径和原因
+- 导入图片后首帧是否正常显示
+- 连续拖动 brightness / contrast / zoom 时是否仍稳定
+- resize 后 shared texture 是否仍可持续更新
+- 关闭窗口时不再引入新的 teardown 崩溃
+
+若 GPU publish 初始化失败或运行时回退，日志中应明确给出 fallback 到 CPU publish 的原因。
+
+### 12.3 当前第二阶段收口状态
+
+截至 2026-05-10，第二阶段当前实现约束如下：
+
+- worker 侧 publish bridge 已切换为 `AngleStandaloneRuntime + D3D11StandalonePublishBridge`
+- 默认发布模式为 `auto`
+  - 优先走 standalone runtime 内的 GPU publish
+  - 通过环境变量 `GLES2ASYNC_PUBLISH_MODE=force_cpu` 可强制走 CPU fallback
+- bridge 初始化时会打印：
+  - `requestedMode`
+  - `initialPath`
+  - ANGLE D3D texture import 入口是否齐备
+  - 当前 `EGLDisplay`
+  - 当前 `EGLConfig`
+  - 当前选路原因
+- 若运行时发生 GPU publish -> CPU fallback：
+  - 日志会明确打印 fallback 原因
+- 当前仍保留 CPU fallback 作为正式兜底能力
 
 ## 13. 风险与注意事项
 
@@ -477,6 +550,7 @@ worker 不应在工程里直接链接另一份 `libEGL/libGLESv2` import lib。
 2. 再切 `PhotoEditorLibraryHost`
 3. 再切 `photo_editor_gles2_simulator`
 4. 再切 `D3D11NativeWorker`
-5. 最后把 publish bridge 收敛为 CPU publish
+5. 第一阶段先把 publish bridge 收敛为 CPU publish
+6. 第二阶段再把 publish bridge 切到 standalone GPU publish，并保留 CPU fallback
 
 这样每一步都有清晰回归边界，便于快速确认问题是否真正被隔离。

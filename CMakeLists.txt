@@ -17,13 +17,13 @@ add_executable(Gles2AsyncRender
     src/angle_standalone_runtime.h
     src/angle_threading.cpp
     src/angle_threading.h
-    src/d3d11_cpu_publish_bridge.cpp
-    src/d3d11_cpu_publish_bridge.h
     src/d3d11_import_widget.cpp
     src/d3d11_import_widget.h
     src/d3d11_native_demo_window.cpp
     src/d3d11_native_demo_window.h
     src/d3d11_native_slot_pool.h
+    src/d3d11_standalone_publish_bridge.cpp
+    src/d3d11_standalone_publish_bridge.h
     src/d3d11_native_worker.cpp
     src/d3d11_native_worker.h
     src/gles2_proc_table.cpp

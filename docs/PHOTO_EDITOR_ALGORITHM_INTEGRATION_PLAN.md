@@ -12,7 +12,7 @@
 >
 > 当前没有现成的算法库文件和头文件，因此本文中的 `photo_editor_*` 仅是项目内模拟实现契约。
 >
-> 算法库侧将持有一套独立、非共享的 `QOpenGLContext + QOffscreenSurface`，并在该上下文内用 GLES2.0 完成模拟图像计算。
+> 当前实现已经收口到 standalone `AngleStandaloneRuntime`，不再依赖 `QOpenGLContext + QOffscreenSurface` 作为 worker 算法执行路径。
 >
 > 变化主要发生在 worker 内部的结果生成阶段和算法库上下文隔离方式。
 
@@ -65,15 +65,15 @@
 
 需要变化的只有 worker 内部和算法库接入边界：
 
-- worker 新增一套算法库专用的非共享 `QOpenGLContext + QOffscreenSurface`
-- 该 context 只服务 `photo_editor_*` 和 GLES2.0 模拟计算
-- worker 另外保留现有的 publish / upload bridge，用于把算法库输出的纹理拷贝到 shared texture slot
-- 算法库 context 不与 `D3D11ImportWidget` 共享，也不与 publish / upload context 共享
+- worker 新增一套 standalone `AngleStandaloneRuntime`
+- 该 runtime 只服务 `photo_editor_*` 和 GLES2.0 模拟计算
+- worker 使用 `D3D11StandalonePublishBridge` 把算法库输出的纹理发布到 shared texture slot
+- 算法库 runtime 不与 `D3D11ImportWidget` 共享，也不回退到 Qt context
 
 这条路径的核心边界是：
 
 - 算法库内部结果不直接暴露给 UI 线程
-- 算法库在独立 non-shared context 中完成 GLES2.0 计算
+- 算法库在独立 standalone runtime 中完成 GLES2.0 计算
 - 宿主不把显示侧 context 共享给算法库
 - 算法库结果先得到 `textureId + size`，再发布到项目自己的 shared texture slot
 
@@ -88,11 +88,11 @@
 ### 3.2 Worker 线程职责
 
 - 管理单张图片的算法 handle
-- 在非共享算法库 context 上初始化 `photo_editor_*`
+- 在 standalone runtime 上初始化 `photo_editor_*`
 - 响应参数更新并调用 `photo_editor_set_opcode`
 - 启动 `photo_editor_process`
 - 接收进度回调并封送回 worker 自己的事件循环
-- 在处理完成后切回算法库 context 执行 `photo_editor_render`
+- 在处理完成后切回算法库 runtime 执行 `photo_editor_render`
 - 将算法库输出的纹理 id 和 size 交给 publish bridge
 - 把结果发布到当前 slot
 - 提交 `frameReady`
@@ -101,8 +101,8 @@
 
 新的设计中，worker 需要区分两类 GL 区间：
 
-1. 算法库的非共享 compute context，用于 `photo_editor_init` / `photo_editor_render`
-2. 现有的 publish / upload context，用于把导出的结果写入 shared texture slot
+1. 算法库 standalone runtime，用于 `photo_editor_init` / `photo_editor_render`
+2. 同一 standalone runtime 内的 publish bridge，用于把导出的结果写入 shared texture slot
 
 `photo_editor_process` 期间不应持有：
 
@@ -198,21 +198,21 @@ struct PhotoEditorSession
 - `renderReady`
   - 当前这轮处理已经结束，可以调用 `photo_editor_render`
 
-### 4.3 `AngleSharedTexturePublishBridge`
+### 4.3 `D3D11StandalonePublishBridge`
 
 职责：
 
-- 管理 publish / upload 侧的 `QOpenGLContext + QOffscreenSurface`
-- 管理把算法库输出纹理拷贝到 shared texture slot 的 copy pass
-- 管理 slot 对应的 EGL / shared texture publish target
+- 管理 standalone runtime 内的 publish pass
+- 管理把算法库输出纹理发布到 shared texture slot
+- 管理 slot 对应的 EGL import surface / CPU fallback 路径
 
 建议接口：
 
 ```cpp
-class AngleSharedTexturePublishBridge
+class D3D11StandalonePublishBridge
 {
 public:
-    bool initialize(QOpenGLContext *shareContext,
+    bool initialize(AngleStandaloneRuntime *runtime,
                     D3D11NativeSlotPool *slotPool,
                     QString *error);
 
@@ -239,10 +239,9 @@ public:
 1. `D3D11ImportWidget` 完成显示侧 `initializeGL()`
 2. UI 启动 worker 线程
 3. worker 创建：
-   - 算法库专用的非共享 `QOpenGLContext`
-   - `QOffscreenSurface`
-   - `AngleSharedTexturePublishBridge`
-4. worker 短时 `makeCurrent()` 到算法库 context
+   - standalone `AngleStandaloneRuntime`
+   - `D3D11StandalonePublishBridge`
+4. worker 短时 `makeCurrent()` 到算法库 runtime
 5. 调用 `photo_editor_init(resolveGlProc)`
 6. 初始化 GLES2.0 模拟计算所需 shader / FBO / 输出资源
 7. `doneCurrent()`
@@ -414,7 +413,7 @@ worker 线程收到回调事件后的处理规则：
 - `src/photo_editor_library_host.h/.cpp`
 - `src/photo_editor_session.h/.cpp`
 - `src/photo_editor_gles2_simulator.h/.cpp`
-- `src/angle_shared_texture_publish_bridge.h/.cpp`
+- `src/d3d11_standalone_publish_bridge.h/.cpp`
 
 ## 8. Mermaid 时序图
 
@@ -431,7 +430,7 @@ sequenceDiagram
     UI->>Widget: initializeGL()
     Widget-->>UI: glInitialized()
     UI-->>Worker: initialize()
-    Worker->>Worker: create non-shared library context + offscreen surface
+    Worker->>Worker: create standalone runtime + publish bridge
     Worker->>AlgoCtx: makeCurrent()
     Worker->>Lib: photo_editor_init(resolveGlProc)
     Worker->>Lib: initialize GLES2 simulator resources

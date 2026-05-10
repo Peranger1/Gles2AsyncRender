@@ -528,6 +528,16 @@ const Gles2ProcTable &AngleStandaloneRuntime::procTable() const
     return m_impl->procTable;
 }
 
+EGLDisplay AngleStandaloneRuntime::eglDisplay() const
+{
+    return m_impl->eglDisplay;
+}
+
+EGLConfig AngleStandaloneRuntime::eglConfig() const
+{
+    return m_impl->eglConfig;
+}
+
 ID3D11Device *AngleStandaloneRuntime::d3d11Device() const
 {
     return m_impl->d3d11Device.Get();

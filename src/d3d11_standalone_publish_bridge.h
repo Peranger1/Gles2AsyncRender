@@ -10,11 +10,11 @@
 class AngleStandaloneRuntime;
 class D3D11NativeSlotPool;
 
-class D3D11CpuPublishBridge final
+class D3D11StandalonePublishBridge final
 {
 public:
-    D3D11CpuPublishBridge();
-    ~D3D11CpuPublishBridge();
+    D3D11StandalonePublishBridge();
+    ~D3D11StandalonePublishBridge();
 
     bool initialize(AngleStandaloneRuntime *runtime,
                     D3D11NativeSlotPool *slotPool,

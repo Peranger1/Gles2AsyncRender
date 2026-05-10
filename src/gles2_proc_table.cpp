@@ -26,9 +26,14 @@ bool Gles2ProcTable::load(const ResolveProc &resolver, QString *error)
         } \
         return false; \
     }
-    GLES2_PROC_TABLE_EGL_SYMBOLS(GLES2_LOAD_PROC)
+    GLES2_PROC_TABLE_REQUIRED_EGL_SYMBOLS(GLES2_LOAD_PROC)
     GLES2_PROC_TABLE_GL_SYMBOLS(GLES2_LOAD_PROC)
 #undef GLES2_LOAD_PROC
+
+#define GLES2_LOAD_OPTIONAL_PROC(name, type) \
+    name = resolveProcAddress<name##Proc>(resolver, #name);
+    GLES2_PROC_TABLE_OPTIONAL_EGL_SYMBOLS(GLES2_LOAD_OPTIONAL_PROC)
+#undef GLES2_LOAD_OPTIONAL_PROC
 
     return true;
 }
@@ -37,7 +42,15 @@ bool Gles2ProcTable::isValid() const
 {
 #define GLES2_CHECK_PROC(name, type) && name != nullptr
     return true
-        GLES2_PROC_TABLE_EGL_SYMBOLS(GLES2_CHECK_PROC)
+        GLES2_PROC_TABLE_REQUIRED_EGL_SYMBOLS(GLES2_CHECK_PROC)
         GLES2_PROC_TABLE_GL_SYMBOLS(GLES2_CHECK_PROC);
 #undef GLES2_CHECK_PROC
+}
+
+bool Gles2ProcTable::supportsAngleD3DTextureImport() const
+{
+    return eglCreatePbufferFromClientBuffer != nullptr
+        && eglBindTexImage != nullptr
+        && eglReleaseTexImage != nullptr
+        && eglQuerySurfacePointerANGLE != nullptr;
 }

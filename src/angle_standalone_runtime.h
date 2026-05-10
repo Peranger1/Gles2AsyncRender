@@ -43,6 +43,8 @@ public:
     RendererIdentity queryRendererIdentity() const;
 
     const Gles2ProcTable &procTable() const;
+    EGLDisplay eglDisplay() const;
+    EGLConfig eglConfig() const;
     ID3D11Device *d3d11Device() const;
     ID3D11DeviceContext *d3d11DeviceContext() const;
 
@@ -50,4 +52,3 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };
-

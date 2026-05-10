@@ -8,12 +8,20 @@
 
 #include <functional>
 
-#define GLES2_PROC_TABLE_EGL_SYMBOLS(X) \
+#define GLES2_PROC_TABLE_REQUIRED_EGL_SYMBOLS(X) \
     X(eglGetProcAddress, __eglMustCastToProperFunctionPointerType (EGLAPIENTRY *)(const char *)) \
     X(eglGetCurrentContext, EGLContext (EGLAPIENTRY *)(void)) \
     X(eglGetCurrentDisplay, EGLDisplay (EGLAPIENTRY *)(void)) \
     X(eglGetError, EGLint (EGLAPIENTRY *)(void)) \
-    X(eglQueryString, const char * (EGLAPIENTRY *)(EGLDisplay, EGLint))
+    X(eglQueryString, const char * (EGLAPIENTRY *)(EGLDisplay, EGLint)) \
+    X(eglChooseConfig, EGLBoolean (EGLAPIENTRY *)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *)) \
+    X(eglDestroySurface, EGLBoolean (EGLAPIENTRY *)(EGLDisplay, EGLSurface))
+
+#define GLES2_PROC_TABLE_OPTIONAL_EGL_SYMBOLS(X) \
+    X(eglCreatePbufferFromClientBuffer, EGLSurface (EGLAPIENTRY *)(EGLDisplay, EGLenum, EGLClientBuffer, EGLConfig, const EGLint *)) \
+    X(eglBindTexImage, EGLBoolean (EGLAPIENTRY *)(EGLDisplay, EGLSurface, EGLint)) \
+    X(eglReleaseTexImage, EGLBoolean (EGLAPIENTRY *)(EGLDisplay, EGLSurface, EGLint)) \
+    X(eglQuerySurfacePointerANGLE, PFNEGLQUERYSURFACEPOINTERANGLEPROC)
 
 #define GLES2_PROC_TABLE_GL_SYMBOLS(X) \
     X(glGetString, const GLubyte * (GL_APIENTRYP)(GLenum)) \
@@ -65,9 +73,11 @@ public:
 
     bool load(const ResolveProc &resolver, QString *error);
     bool isValid() const;
+    bool supportsAngleD3DTextureImport() const;
 
 #define GLES2_DECLARE_PROC(name, type) using name##Proc = type; name##Proc name = nullptr;
-    GLES2_PROC_TABLE_EGL_SYMBOLS(GLES2_DECLARE_PROC)
+    GLES2_PROC_TABLE_REQUIRED_EGL_SYMBOLS(GLES2_DECLARE_PROC)
+    GLES2_PROC_TABLE_OPTIONAL_EGL_SYMBOLS(GLES2_DECLARE_PROC)
     GLES2_PROC_TABLE_GL_SYMBOLS(GLES2_DECLARE_PROC)
 #undef GLES2_DECLARE_PROC
 };
