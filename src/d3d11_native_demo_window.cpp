@@ -3,6 +3,7 @@
 #include "d3d11_import_widget.h"
 #include "d3d11_native_slot_pool.h"
 #include "d3d11_native_worker.h"
+#include "src/framework/core/shared_frame_slot_pool.h"
 #include "runtime_diagnostics.h"
 
 #include <QAction>
@@ -123,7 +124,7 @@ void D3D11NativeDemoWindow::onDisplayReadyForWorker()
         "initialize",
         Qt::BlockingQueuedConnection,
         Q_RETURN_ARG(bool, initialized),
-        Q_ARG(D3D11NativeSlotPool *, m_slotPool.get()),
+        Q_ARG(ISharedFrameSlotPool *, m_slotPool.get()),
         Q_ARG(QSize, m_displayWidget->outputPixelSize()));
     initialized = invoked && initialized;
     if (!initialized) {

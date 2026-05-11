@@ -13,6 +13,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 
 add_executable(Gles2AsyncRender
+    src/adapters/photo_editor/photo_editor_render_payload.h
+    src/adapters/photo_editor/photo_editor_render_session.cpp
+    src/adapters/photo_editor/photo_editor_render_session.h
     src/angle_standalone_runtime.cpp
     src/angle_standalone_runtime.h
     src/angle_threading.cpp
@@ -26,6 +29,17 @@ add_executable(Gles2AsyncRender
     src/d3d11_standalone_publish_bridge.h
     src/d3d11_native_worker.cpp
     src/d3d11_native_worker.h
+    src/framework/core/async_render_executor.cpp
+    src/framework/core/async_render_executor.h
+    src/framework/core/async_render_session.h
+    src/framework/core/async_render_types.h
+    src/framework/core/display_presenter.h
+    src/framework/core/frame_publisher.h
+    src/framework/core/render_runtime.h
+    src/framework/core/shared_frame_slot_pool.h
+    src/framework/qt/qt_angle_display_presenter.cpp
+    src/framework/qt/qt_angle_display_presenter.h
+    src/framework/qt/qopenglwidget_display_host.h
     src/gles2_proc_table.cpp
     src/gles2_proc_table.h
     src/gles2_shader_utils.cpp

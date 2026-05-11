@@ -1,5 +1,6 @@
 #pragma once
 
+#include "framework/core/render_runtime.h"
 #include "gles2_proc_table.h"
 
 #include <QString>
@@ -13,7 +14,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 
-class AngleStandaloneRuntime final
+class AngleStandaloneRuntime final : public IRenderRuntime
 {
 public:
     struct RendererIdentity final
@@ -34,15 +35,15 @@ public:
     AngleStandaloneRuntime();
     ~AngleStandaloneRuntime();
 
-    bool initialize(QString *error);
-    bool makeCurrent(QString *error);
-    bool doneCurrent(QString *error);
-    void shutdown();
+    bool initialize(QString *error) override;
+    bool makeCurrent(QString *error) override;
+    bool doneCurrent(QString *error) override;
+    void shutdown() override;
 
-    void *resolveProc(const char *name) const;
+    void *resolveProc(const char *name) const override;
     RendererIdentity queryRendererIdentity() const;
 
-    const Gles2ProcTable &procTable() const;
+    const Gles2ProcTable &procTable() const override;
     EGLDisplay eglDisplay() const;
     EGLConfig eglConfig() const;
     ID3D11Device *d3d11Device() const;

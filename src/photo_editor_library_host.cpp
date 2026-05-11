@@ -1,7 +1,7 @@
 #include "photo_editor_library_host.h"
 
-#include "angle_standalone_runtime.h"
 #include "photo_editor_gles2_simulator.h"
+#include "src/gles2_proc_table.h"
 
 #include <mutex>
 
@@ -10,10 +10,10 @@ namespace
 std::once_flag g_photoEditorInitOnce;
 bool g_photoEditorInitSucceeded = false;
 QString g_photoEditorInitError;
-AngleStandaloneRuntime *g_photoEditorRuntime = nullptr;
+IRenderRuntime *g_photoEditorRuntime = nullptr;
 } // namespace
 
-bool PhotoEditorLibraryHost::initializeOnce(AngleStandaloneRuntime *runtime, QString *error)
+bool PhotoEditorLibraryHost::initializeOnce(IRenderRuntime *runtime, QString *error)
 {
     if (runtime == nullptr) {
         if (error) {

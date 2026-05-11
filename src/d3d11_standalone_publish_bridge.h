@@ -1,5 +1,7 @@
 #pragma once
 
+#include "framework/core/frame_publisher.h"
+
 #include <QSize>
 #include <QString>
 
@@ -8,24 +10,24 @@
 #include <memory>
 
 class AngleStandaloneRuntime;
-class D3D11NativeSlotPool;
+class ISharedFrameSlotPool;
 
-class D3D11StandalonePublishBridge final
+class D3D11StandalonePublishBridge final : public IFramePublisher
 {
 public:
     D3D11StandalonePublishBridge();
     ~D3D11StandalonePublishBridge();
 
     bool initialize(AngleStandaloneRuntime *runtime,
-                    D3D11NativeSlotPool *slotPool,
+                    ISharedFrameSlotPool *slotPool,
                     QString *error);
 
     bool publishToSlot(GLuint sourceTextureId,
                        const QSize &sourceSize,
                        int slotIndex,
-                       QString *error);
+                       QString *error) override;
 
-    void releaseGlResources();
+    void releaseGlResources() override;
 
 private:
     struct Impl;

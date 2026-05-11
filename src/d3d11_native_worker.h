@@ -7,7 +7,7 @@
 #include <QSize>
 #include <memory>
 
-class D3D11NativeSlotPool;
+class ISharedFrameSlotPool;
 
 class D3D11NativeWorker final : public QObject
 {
@@ -18,7 +18,7 @@ public:
     ~D3D11NativeWorker() override;
 
 public slots:
-    bool initialize(D3D11NativeSlotPool *slotPool, QSize outputSize);
+    bool initialize(ISharedFrameSlotPool *slotPool, QSize outputSize);
     void setOutputSize(QSize size);
     void setEffectParameters(const ImageEffectParameters &parameters);
     void loadImageDirectory(const QString &directoryPath);
@@ -45,15 +45,17 @@ private:
 
     QSize currentOutputSize() const;
     ImageEffectParameters currentEffectParameters() const;
-    void scheduleRender(int delayMs = 0);
+    void enqueueLatestRenderRequest();
+    void schedulePump(int delayMs = 0);
     void emitImageSelection();
+    void pumpRender();
 
 private slots:
     void onProcessProgressEvent(int progress, bool isEnd);
 
 private:
     std::unique_ptr<Impl> m_impl;
-    D3D11NativeSlotPool *m_slotPool = nullptr;
+    ISharedFrameSlotPool *m_slotPool = nullptr;
     ImageEffectParameters m_effectParameters;
     QSize m_outputSize;
     bool m_initialized = false;
@@ -61,5 +63,6 @@ private:
     bool m_shuttingDown = false;
     bool m_waitingForFreeSlot = false;
     quint64 m_frameIndex = 0;
+    quint64 m_requestSequence = 0;
     mutable QMutex m_stateMutex;
 };

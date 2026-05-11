@@ -1,13 +1,13 @@
 #pragma once
 
-#include <QString>
+#include "framework/core/render_runtime.h"
 
-class AngleStandaloneRuntime;
+#include <QString>
 
 class PhotoEditorLibraryHost
 {
 public:
-    bool initializeOnce(AngleStandaloneRuntime *runtime, QString *error);
+    bool initializeOnce(IRenderRuntime *runtime, QString *error);
 
 private:
     static void *resolveGlProc(const char *name);

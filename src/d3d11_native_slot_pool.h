@@ -1,19 +1,15 @@
 #pragma once
 
+#include "framework/core/async_render_types.h"
+#include "framework/core/shared_frame_slot_pool.h"
+
 #include <QMutex>
 #include <QSize>
 #include <QVector>
 
-struct D3D11NativeFrame final
-{
-    int slotIndex = -1;
-    quintptr sharedHandle = 0;
-    QSize size;
-    quint64 generation = 0;
-    quint64 frameIndex = 0;
-};
+using D3D11NativeFrame = PublishedFrame;
 
-class D3D11NativeSlotPool final
+class D3D11NativeSlotPool final : public ISharedFrameSlotPool
 {
 public:
     explicit D3D11NativeSlotPool(int slotCount = 3)
@@ -21,12 +17,12 @@ public:
     {
     }
 
-    int slotCount() const
+    int slotCount() const override
     {
         return m_slots.size();
     }
 
-    void reset()
+    void reset() override
     {
         QMutexLocker locker(&m_mutex);
         for (Slot &slot : m_slots) {
@@ -39,7 +35,7 @@ public:
         m_pendingSlot = -1;
     }
 
-    void updateSlot(int slotIndex, quintptr sharedHandle, const QSize &size, quint64 generation)
+    void updateSlot(int slotIndex, quintptr sharedHandle, const QSize &size, quint64 generation) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex)) {
@@ -52,7 +48,7 @@ public:
         slot.generation = generation;
     }
 
-    bool querySlot(int slotIndex, D3D11NativeFrame *frame) const
+    bool querySlot(int slotIndex, D3D11NativeFrame *frame) const override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || frame == nullptr) {
@@ -72,7 +68,7 @@ public:
         return true;
     }
 
-    bool tryAcquireRenderSlot(int *slotIndex)
+    bool tryAcquireRenderSlot(int *slotIndex) override
     {
         QMutexLocker locker(&m_mutex);
         if (m_pendingSlot != -1) {
@@ -92,7 +88,7 @@ public:
         return false;
     }
 
-    void abandonRenderSlot(int slotIndex)
+    void abandonRenderSlot(int slotIndex) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex)) {
@@ -105,7 +101,7 @@ public:
         }
     }
 
-    bool submitRenderedFrame(int slotIndex, quint64 frameIndex, D3D11NativeFrame *frame)
+    bool submitRenderedFrame(int slotIndex, quint64 frameIndex, D3D11NativeFrame *frame) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || frame == nullptr) {
@@ -133,7 +129,7 @@ public:
         return true;
     }
 
-    bool consumePendingFrame(int slotIndex, D3D11NativeFrame *frame)
+    bool consumePendingFrame(int slotIndex, D3D11NativeFrame *frame) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || m_pendingSlot != slotIndex || frame == nullptr) {
@@ -153,7 +149,7 @@ public:
         return true;
     }
 
-    void releasePendingSlot(int slotIndex)
+    void releasePendingSlot(int slotIndex) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex)) {

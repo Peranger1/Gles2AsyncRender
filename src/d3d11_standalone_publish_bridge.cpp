@@ -1,7 +1,7 @@
 #include "d3d11_standalone_publish_bridge.h"
 
 #include "angle_standalone_runtime.h"
-#include "d3d11_native_slot_pool.h"
+#include "framework/core/shared_frame_slot_pool.h"
 #include "gles2_proc_table.h"
 #include "gles2_shader_utils.h"
 #include "runtime_diagnostics.h"
@@ -130,7 +130,7 @@ struct D3D11StandalonePublishBridge::Impl final
     };
 
     AngleStandaloneRuntime *runtime = nullptr;
-    D3D11NativeSlotPool *slotPool = nullptr;
+    ISharedFrameSlotPool *slotPool = nullptr;
     QVector<SlotResources> slotResources;
     QVector<ImportedSlot> importedSlots;
     GLuint publishFramebufferId = 0;
@@ -147,7 +147,7 @@ struct D3D11StandalonePublishBridge::Impl final
     QByteArray uploadBytes;
 
     bool initialize(AngleStandaloneRuntime *standaloneRuntime,
-                    D3D11NativeSlotPool *slotPoolPtr,
+                    ISharedFrameSlotPool *slotPoolPtr,
                     QString *error)
     {
         runtime = standaloneRuntime;
@@ -424,7 +424,7 @@ void main()
             return false;
         }
 
-        D3D11NativeFrame frame;
+        PublishedFrame frame;
         if (!slotPool->querySlot(slotIndex, &frame)) {
             if (error) {
                 *error = QStringLiteral("The standalone publish bridge import slot %1 is unavailable.").arg(slotIndex);
@@ -771,7 +771,7 @@ D3D11StandalonePublishBridge::D3D11StandalonePublishBridge()
 D3D11StandalonePublishBridge::~D3D11StandalonePublishBridge() = default;
 
 bool D3D11StandalonePublishBridge::initialize(AngleStandaloneRuntime *runtime,
-                                              D3D11NativeSlotPool *slotPool,
+                                              ISharedFrameSlotPool *slotPool,
                                               QString *error)
 {
     return m_impl->initialize(runtime, slotPool, error);
