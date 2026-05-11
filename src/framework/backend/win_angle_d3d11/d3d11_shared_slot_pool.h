@@ -7,12 +7,12 @@
 #include <QSize>
 #include <QVector>
 
-using D3D11NativeFrame = PublishedFrame;
+using D3D11SharedFrame = PublishedFrame;
 
-class D3D11NativeSlotPool final : public ISharedFrameSlotPool
+class D3D11SharedSlotPool final : public ISharedFrameSlotPool
 {
 public:
-    explicit D3D11NativeSlotPool(int slotCount = 3)
+    explicit D3D11SharedSlotPool(int slotCount = 3)
         : m_slots(qMax(2, slotCount))
     {
     }
@@ -48,7 +48,7 @@ public:
         slot.generation = generation;
     }
 
-    bool querySlot(int slotIndex, D3D11NativeFrame *frame) const override
+    bool querySlot(int slotIndex, D3D11SharedFrame *frame) const override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || frame == nullptr) {
@@ -101,7 +101,7 @@ public:
         }
     }
 
-    bool submitRenderedFrame(int slotIndex, quint64 frameIndex, D3D11NativeFrame *frame) override
+    bool submitRenderedFrame(int slotIndex, quint64 frameIndex, D3D11SharedFrame *frame) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || frame == nullptr) {
@@ -129,7 +129,7 @@ public:
         return true;
     }
 
-    bool consumePendingFrame(int slotIndex, D3D11NativeFrame *frame) override
+    bool consumePendingFrame(int slotIndex, D3D11SharedFrame *frame) override
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || m_pendingSlot != slotIndex || frame == nullptr) {

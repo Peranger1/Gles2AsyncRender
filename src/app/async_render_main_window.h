@@ -8,8 +8,8 @@
 #include <memory>
 
 class QAction;
-class D3D11ImportWidget;
-class D3D11NativeSlotPool;
+class QOpenGLWidgetFrameView;
+class D3D11SharedSlotPool;
 class D3D11NativeWorker;
 class QLabel;
 class QDockWidget;
@@ -17,13 +17,13 @@ class QPushButton;
 class QSlider;
 class QString;
 
-class D3D11NativeDemoWindow final : public QMainWindow
+class AsyncRenderMainWindow final : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit D3D11NativeDemoWindow(QWidget *parent = nullptr);
-    ~D3D11NativeDemoWindow() override;
+    explicit AsyncRenderMainWindow(QWidget *parent = nullptr);
+    ~AsyncRenderMainWindow() override;
 
 private slots:
     void onDisplayGlInitialized();
@@ -51,8 +51,8 @@ private:
     void pushEffectParameters();
     void requestRender();
 
-    D3D11ImportWidget *m_displayWidget = nullptr;
-    std::shared_ptr<D3D11NativeSlotPool> m_slotPool;
+    QOpenGLWidgetFrameView *m_displayWidget = nullptr;
+    std::shared_ptr<D3D11SharedSlotPool> m_slotPool;
     D3D11NativeWorker *m_worker = nullptr;
     QThread m_workerThread;
 

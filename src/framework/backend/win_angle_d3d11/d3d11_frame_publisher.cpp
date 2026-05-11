@@ -1,4 +1,4 @@
-#include "d3d11_standalone_publish_bridge.h"
+#include "d3d11_frame_publisher.h"
 
 #include "angle_standalone_runtime.h"
 #include "framework/core/shared_frame_slot_pool.h"
@@ -94,21 +94,21 @@ PublishMode parsePublishMode(const QByteArray &value, QString *warning)
 
 void logPublishMessage(const QString &message)
 {
-    RuntimeDiagnostics::logInfo("[D3D11StandalonePublishBridge]", message);
+    RuntimeDiagnostics::logInfo("[D3D11FramePublisher]", message);
 }
 
 void logPublishWarning(const QString &message)
 {
-    RuntimeDiagnostics::logWarning("[D3D11StandalonePublishBridge]", message);
+    RuntimeDiagnostics::logWarning("[D3D11FramePublisher]", message);
 }
 
 void logPublishDiag(const QString &message)
 {
-    RuntimeDiagnostics::logDiag("[D3D11StandalonePublishBridge]", message);
+    RuntimeDiagnostics::logDiag("[D3D11FramePublisher]", message);
 }
 }
 
-struct D3D11StandalonePublishBridge::Impl final
+struct D3D11FramePublisher::Impl final
 {
     struct SlotResources final
     {
@@ -763,29 +763,29 @@ void main()
     }
 };
 
-D3D11StandalonePublishBridge::D3D11StandalonePublishBridge()
+D3D11FramePublisher::D3D11FramePublisher()
     : m_impl(std::make_unique<Impl>())
 {
 }
 
-D3D11StandalonePublishBridge::~D3D11StandalonePublishBridge() = default;
+D3D11FramePublisher::~D3D11FramePublisher() = default;
 
-bool D3D11StandalonePublishBridge::initialize(AngleStandaloneRuntime *runtime,
-                                              ISharedFrameSlotPool *slotPool,
-                                              QString *error)
+bool D3D11FramePublisher::initialize(AngleStandaloneRuntime *runtime,
+                                     ISharedFrameSlotPool *slotPool,
+                                     QString *error)
 {
     return m_impl->initialize(runtime, slotPool, error);
 }
 
-bool D3D11StandalonePublishBridge::publishToSlot(GLuint sourceTextureId,
-                                                 const QSize &sourceSize,
-                                                 int slotIndex,
-                                                 QString *error)
+bool D3D11FramePublisher::publishToSlot(GLuint sourceTextureId,
+                                        const QSize &sourceSize,
+                                        int slotIndex,
+                                        QString *error)
 {
     return m_impl->publishToSlot(sourceTextureId, sourceSize, slotIndex, error);
 }
 
-void D3D11StandalonePublishBridge::releaseGlResources()
+void D3D11FramePublisher::releaseGlResources()
 {
     m_impl->releaseGlResources();
 }

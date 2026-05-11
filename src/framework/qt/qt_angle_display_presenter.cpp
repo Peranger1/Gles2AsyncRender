@@ -1,6 +1,6 @@
-#include "src/framework/qt/qt_angle_display_presenter.h"
+#include "qt_angle_display_presenter.h"
 
-#include "src/qt_angle_egl_tools.h"
+#include "framework/backend/win_angle_d3d11/qt_angle_egl_tools.h"
 
 #include <QtANGLE/EGL/eglext.h>
 

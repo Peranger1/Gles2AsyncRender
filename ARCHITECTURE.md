@@ -24,14 +24,14 @@
 ```mermaid
 flowchart LR
     UI["UI 线程"]
-    WIN["D3D11NativeDemoWindow"]
-    WGT["D3D11ImportWidget"]
+    WIN["AsyncRenderMainWindow"]
+    WGT["QOpenGLWidgetFrameView"]
     WK["Worker 线程"]
     WRK["D3D11NativeWorker"]
     ALG["PhotoEditorSession / 算法库"]
     RT["AngleStandaloneRuntime"]
-    PUB["D3D11StandalonePublishBridge"]
-    POOL["D3D11NativeSlotPool"]
+    PUB["D3D11FramePublisher"]
+    POOL["D3D11SharedSlotPool"]
     SHARED["D3D11 Shared Texture Slot"]
     LOCAL["UI 本地显示纹理"]
 
@@ -54,9 +54,9 @@ flowchart LR
 
 - 设置 `Qt::AA_UseOpenGLES` 和 `Qt::AA_ShareOpenGLContexts`
 - 将默认 surface format 固定为 OpenGLES 2.0
-- 创建 `D3D11NativeDemoWindow`
+- 创建 `AsyncRenderMainWindow`
 
-### `src/d3d11_native_demo_window.*`
+### `src/app/async_render_main_window.*`
 
 - 持有主窗口 UI
 - 持有 worker `QThread`
@@ -64,7 +64,7 @@ flowchart LR
 - 将菜单、切图和参数变化转发给 worker
 - 接收 worker 的状态和错误
 
-### `src/d3d11_import_widget.*`
+### `src/framework/qt/qopenglwidget_frame_view.*`
 
 - 持有 `QOpenGLWidget` 显示面
 - 解析 Qt 当前使用的 ANGLE/EGL 入口
@@ -80,20 +80,20 @@ flowchart LR
 - 加载图片目录并切换当前图片
 - 异步运行处理并把完成帧发布到 slot pool
 
-### `src/d3d11_native_slot_pool.h`
+### `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
 
 - 只保存每个 slot 的元数据
 - 跟踪 `Free`、`Rendering`、`Pending` 状态
 - 防止 worker 在 UI 释放前覆盖 slot
 - 防止 UI 在发布完成前消费 slot
 
-### `src/angle_standalone_runtime.*`
+### `src/framework/backend/win_angle_d3d11/angle_standalone_runtime.*`
 
 - 创建独立的 D3D11 device 和 ANGLE EGL/GLES 上下文
 - 从 Qt 已加载的 ANGLE 模块中解析 EGL/GLES 入口
 - 对外暴露运行时身份信息，便于诊断
 
-### `src/d3d11_standalone_publish_bridge.*`
+### `src/framework/backend/win_angle_d3d11/d3d11_frame_publisher.*`
 
 - 将 worker 生成的 GL texture 发布到 D3D11 shared texture slot
 - 使用 keyed mutex 保护发布过程
@@ -106,7 +106,7 @@ flowchart LR
 - 提供当前的 GLES2 simulator 实现
 - 封装源图上传、输出目标创建、异步处理和最终渲染
 
-### `src/qt_angle_egl_tools.*`
+### `src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.*`
 
 - 解析 Qt 持有的 ANGLE EGL 模块
 - 提取当前 display 对应的 `EGLDisplay`、`EGLConfig` 和渲染器身份
@@ -138,7 +138,7 @@ flowchart LR
 
 ## 6. Slot 模型
 
-`D3D11NativeSlotPool` 是核心同步原语。
+`D3D11SharedSlotPool` 是核心同步原语。
 
 ### Slot 状态
 
@@ -182,13 +182,13 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant UI as "UI 线程"
-    participant Win as "D3D11NativeDemoWindow"
-    participant Wgt as "D3D11ImportWidget"
+    participant Win as "AsyncRenderMainWindow"
+    participant Wgt as "QOpenGLWidgetFrameView"
     participant Wkr as "Worker 线程 / D3D11NativeWorker"
     participant RT as "AngleStandaloneRuntime"
     participant Alg as "PhotoEditorSession"
-    participant Pub as "D3D11StandalonePublishBridge"
-    participant Pool as "D3D11NativeSlotPool"
+    participant Pub as "D3D11FramePublisher"
+    participant Pool as "D3D11SharedSlotPool"
 
     UI->>Wgt: initializeGL()
     Wgt->>Wgt: 解析 Qt 持有的 ANGLE/EGL
@@ -225,8 +225,8 @@ sequenceDiagram
 启动顺序很重要：
 
 1. `main.cpp` 先设置全局 Qt/GL 属性。
-2. `D3D11NativeDemoWindow` 创建显示 widget 和 worker 对象。
-3. `D3D11ImportWidget::initializeGL()` 解析当前 Qt ANGLE 运行时。
+2. `AsyncRenderMainWindow` 创建显示 widget 和 worker 对象。
+3. `QOpenGLWidgetFrameView::initializeGL()` 解析当前 Qt ANGLE 运行时。
 4. 第一次 `frameSwapped()` 说明显示侧已经足够稳定。
 5. 只有到这一步，窗口才会初始化 worker 运行时。
 
@@ -269,14 +269,13 @@ UI 不直接长期持有 shared slot。
 ## 13. 相关文件
 
 - `src/main.cpp`
-- `src/d3d11_native_demo_window.cpp`
-- `src/d3d11_import_widget.cpp`
+- `src/app/async_render_main_window.cpp`
+- `src/framework/qt/qopenglwidget_frame_view.cpp`
 - `src/d3d11_native_worker.cpp`
-- `src/d3d11_native_slot_pool.h`
-- `src/angle_standalone_runtime.cpp`
-- `src/d3d11_standalone_publish_bridge.cpp`
+- `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
+- `src/framework/backend/win_angle_d3d11/angle_standalone_runtime.cpp`
+- `src/framework/backend/win_angle_d3d11/d3d11_frame_publisher.cpp`
 - `src/photo_editor_gles2_simulator.cpp`
-- `src/qt_angle_egl_tools.cpp`
+- `src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp`
 - `src/angle_threading.cpp`
 - `docs/FAILURE_ANALYSIS.md`
-

@@ -1,11 +1,9 @@
 #include <QApplication>
-#include <QDebug>
 #include <QMetaType>
 #include <QSurfaceFormat>
 
-#include "d3d11_native_demo_window.h"
-#include "d3d11_native_slot_pool.h"
-#include "src/framework/core/shared_frame_slot_pool.h"
+#include "app/async_render_main_window.h"
+#include "framework/core/shared_frame_slot_pool.h"
 #include "image_effect_types.h"
 
 int main(int argc, char *argv[])
@@ -32,7 +30,7 @@ int main(int argc, char *argv[])
     qRegisterMetaType<ISharedFrameSlotPool *>("ISharedFrameSlotPool*");
     qRegisterMetaType<quint64>("quint64");
 
-    D3D11NativeDemoWindow window;
+    AsyncRenderMainWindow window;
     window.show();
 
     return app.exec();

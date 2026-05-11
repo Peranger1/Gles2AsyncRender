@@ -25,7 +25,7 @@
 
 ## 当前默认入口
 
-当前程序现在只有一个主入口：`D3D11NativeDemoWindow`
+当前程序现在只有一个主入口：`AsyncRenderMainWindow`
 
 - 无参启动：D3D11 native producer + ANGLE/QOpenGLWidget consumer
 
@@ -51,19 +51,19 @@
 
 当前代码的职责拆分如下：
 
-- `src/d3d11_native_demo_window.*`
+- `src/app/async_render_main_window.*`
   - 当前默认主窗口入口
   - 提供菜单、精简状态栏和参数控制面板
   - 创建并管理 D3D11 worker 线程
   - 响应“打开目录 / 切图 / 调参 / 请求重绘”
 
-- `src/d3d11_import_widget.*`
-  - 当前默认显示侧 widget
+- `src/framework/qt/qopenglwidget_frame_view.*`
+  - 当前默认显示侧 widget 壳
   - 只负责把 D3D11 shared texture 导入 ANGLE/EGL，并在 `paintGL()` 中显示
   - 持有 `pending` 元数据和 UI 本地 `display texture`
   - 在 `paintGL()` 中对 shared slot 执行 `copy-on-acquire`，并在同一次 `paintGL()` 内释放 keyed mutex 与归还 slot
 
-- `src/d3d11_native_slot_pool.h`
+- `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
   - 管理 `free / rendering / pending` 的 slot 生命周期
   - 保证 UI 不会读取正在写入的 slot，worker 也不会覆盖尚未消费完成的 pending slot
 
@@ -78,7 +78,7 @@
 
 当前渲染链路如下：
 
-1. `D3D11ImportWidget` 初始化显示侧 OpenGL ES / ANGLE 上下文
+1. `QOpenGLWidgetFrameView` 初始化显示侧 OpenGL ES / ANGLE 上下文
 2. 等显示侧首帧准备完成后，再初始化 `D3D11NativeWorker`
 3. worker 创建 D3D11 device / context、slot pool、shared texture 和 keyed mutex
 4. 用户导入图片目录后，worker 加载首张图片并上传 D3D11 源纹理
@@ -104,7 +104,7 @@
 
 ```mermaid
 sequenceDiagram
-    participant UI as "UI Thread / D3D11NativeDemoWindow"
+    participant UI as "UI Thread / AsyncRenderMainWindow"
     participant Widget as "QOpenGLWidget"
     participant Worker as "Worker Thread"
     participant D3D as "D3D11 Worker Context"

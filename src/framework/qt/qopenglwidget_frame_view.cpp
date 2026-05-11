@@ -1,35 +1,35 @@
-#include "d3d11_import_widget.h"
+#include "qopenglwidget_frame_view.h"
 
-#include "src/angle_threading.h"
-#include "src/framework/qt/qt_angle_display_presenter.h"
-#include "src/runtime_diagnostics.h"
+#include "angle_threading.h"
+#include "framework/qt/qt_angle_display_presenter.h"
+#include "runtime_diagnostics.h"
 
 namespace
 {
 void logImportWidgetMessage(const QString &message)
 {
-    RuntimeDiagnostics::logInfo("[D3D11ImportWidget]", message);
+    RuntimeDiagnostics::logInfo("[QOpenGLWidgetFrameView]", message);
 }
 
 void logImportWidgetDiag(const QString &message)
 {
-    RuntimeDiagnostics::logDiag("[D3D11ImportWidget]", message);
+    RuntimeDiagnostics::logDiag("[QOpenGLWidgetFrameView]", message);
 }
 }
 
-D3D11ImportWidget::D3D11ImportWidget(QWidget *parent)
+QOpenGLWidgetFrameView::QOpenGLWidgetFrameView(QWidget *parent)
     : QOpenGLWidget(parent)
     , m_displayHost(this)
     , m_presenter(std::make_unique<QtAngleDisplayPresenter>())
 {
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
-    connect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::notifyDisplayReadyForWorker, Qt::QueuedConnection);
+    connect(this, &QOpenGLWidget::frameSwapped, this, &QOpenGLWidgetFrameView::notifyDisplayReadyForWorker, Qt::QueuedConnection);
 }
 
-D3D11ImportWidget::~D3D11ImportWidget()
+QOpenGLWidgetFrameView::~QOpenGLWidgetFrameView()
 {
     m_shuttingDown = true;
-    disconnect(this, &QOpenGLWidget::frameSwapped, this, &D3D11ImportWidget::notifyDisplayReadyForWorker);
+    disconnect(this, &QOpenGLWidget::frameSwapped, this, &QOpenGLWidgetFrameView::notifyDisplayReadyForWorker);
     logImportWidgetDiag(QStringLiteral("Destructor begin"));
     if (context()) {
         makeCurrent();
@@ -39,7 +39,7 @@ D3D11ImportWidget::~D3D11ImportWidget()
     logImportWidgetDiag(QStringLiteral("Destructor end"));
 }
 
-void D3D11ImportWidget::setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool)
+void QOpenGLWidgetFrameView::setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool)
 {
     m_slotPool = slotPool;
     if (auto *presenter = dynamic_cast<QtAngleDisplayPresenter *>(m_presenter.get())) {
@@ -47,16 +47,16 @@ void D3D11ImportWidget::setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> 
     }
 }
 
-QSize D3D11ImportWidget::outputPixelSize() const
+QSize QOpenGLWidgetFrameView::outputPixelSize() const
 {
     return m_displayHost.outputPixelSize();
 }
 
-void D3D11ImportWidget::initializeGL()
+void QOpenGLWidgetFrameView::initializeGL()
 {
     QOpenGLFunctions *gl = context() ? context()->functions() : nullptr;
     if (gl == nullptr) {
-        logImportWidgetMessage(QStringLiteral("D3D11 import widget initialization failed: Qt did not provide QOpenGLFunctions for the current context."));
+        logImportWidgetMessage(QStringLiteral("Frame view initialization failed: Qt did not provide QOpenGLFunctions for the current context."));
         return;
     }
     gl->glDisable(GL_DEPTH_TEST);
@@ -68,7 +68,7 @@ void D3D11ImportWidget::initializeGL()
     QString error;
     QString runtimeLog;
     if (!m_presenter->initialize(&m_displayHost, &error, &runtimeLog)) {
-        logImportWidgetMessage(QStringLiteral("D3D11 import widget initialization failed: %1\n%2")
+        logImportWidgetMessage(QStringLiteral("Frame view initialization failed: %1\n%2")
                                    .arg(error, runtimeLog));
         return;
     }
@@ -81,13 +81,13 @@ void D3D11ImportWidget::initializeGL()
     m_workerReadyPending = true;
 }
 
-void D3D11ImportWidget::resizeGL(int, int)
+void QOpenGLWidgetFrameView::resizeGL(int, int)
 {
     m_presenter->onOutputSizeChanged(outputPixelSize());
     emit outputSizeChanged(outputPixelSize());
 }
 
-void D3D11ImportWidget::paintGL()
+void QOpenGLWidgetFrameView::paintGL()
 {
     QString error;
     bool releasedSlotForWorker = false;
@@ -100,7 +100,7 @@ void D3D11ImportWidget::paintGL()
     }
 }
 
-void D3D11ImportWidget::onFrameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex)
+void QOpenGLWidgetFrameView::onFrameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex)
 {
     if (m_shuttingDown) {
         return;
@@ -115,7 +115,7 @@ void D3D11ImportWidget::onFrameReady(int slotIndex, quint64 generation, QSize si
     m_displayHost.requestUpdate();
 }
 
-void D3D11ImportWidget::notifyDisplayReadyForWorker()
+void QOpenGLWidgetFrameView::notifyDisplayReadyForWorker()
 {
     if (m_shuttingDown || !m_workerReadyPending) {
         return;

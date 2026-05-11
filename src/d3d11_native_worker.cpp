@@ -1,12 +1,12 @@
 #include "d3d11_native_worker.h"
 
-#include "src/adapters/photo_editor/photo_editor_render_payload.h"
-#include "src/adapters/photo_editor/photo_editor_render_session.h"
-#include "src/angle_standalone_runtime.h"
-#include "src/d3d11_standalone_publish_bridge.h"
-#include "src/framework/core/async_render_executor.h"
-#include "src/framework/core/shared_frame_slot_pool.h"
-#include "src/runtime_diagnostics.h"
+#include "adapters/photo_editor/photo_editor_render_payload.h"
+#include "adapters/photo_editor/photo_editor_render_session.h"
+#include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
+#include "framework/backend/win_angle_d3d11/d3d11_frame_publisher.h"
+#include "framework/core/async_render_executor.h"
+#include "framework/core/shared_frame_slot_pool.h"
+#include "runtime_diagnostics.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -54,7 +54,7 @@ struct D3D11NativeWorker::Impl final
 {
     std::unique_ptr<AngleStandaloneRuntime> algorithmRuntime;
     PhotoEditorRenderSession session;
-    D3D11StandalonePublishBridge publishBridge;
+    D3D11FramePublisher publishBridge;
     AsyncRenderExecutor executor;
 
     QStringList imagePaths;

@@ -1,7 +1,7 @@
 #include "photo_editor_gles2_simulator.h"
 
-#include "gles2_proc_table.h"
-#include "gles2_shader_utils.h"
+#include "framework/backend/win_angle_d3d11/gles2_proc_table.h"
+#include "framework/backend/win_angle_d3d11/gles2_shader_utils.h"
 #include "runtime_diagnostics.h"
 
 #include <QByteArray>
@@ -544,6 +544,8 @@ bool photo_editor_render(void *handle, GLuint *textureId, QSize *size, QString *
         0.0f, 0.0f,
         1.0f, 0.0f
     };
+
+    QThread::currentThread()->msleep(150);
 
     const QSize targetSize = state->outputTextureSize;
     const QImage sourceImage = state->sourceImage;

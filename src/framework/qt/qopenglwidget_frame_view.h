@@ -1,19 +1,19 @@
 #pragma once
 
-#include "src/framework/core/display_presenter.h"
-#include "src/framework/core/shared_frame_slot_pool.h"
-#include "src/framework/qt/qopenglwidget_display_host.h"
+#include "framework/core/display_presenter.h"
+#include "framework/core/shared_frame_slot_pool.h"
+#include "framework/qt/qopenglwidget_display_host.h"
 
 #include <QOpenGLWidget>
 #include <memory>
 
-class D3D11ImportWidget final : public QOpenGLWidget
+class QOpenGLWidgetFrameView final : public QOpenGLWidget
 {
     Q_OBJECT
 
 public:
-    explicit D3D11ImportWidget(QWidget *parent = nullptr);
-    ~D3D11ImportWidget() override;
+    explicit QOpenGLWidgetFrameView(QWidget *parent = nullptr);
+    ~QOpenGLWidgetFrameView() override;
 
     void setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool);
     QSize outputPixelSize() const;

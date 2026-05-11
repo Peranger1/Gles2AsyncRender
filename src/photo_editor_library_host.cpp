@@ -1,7 +1,7 @@
 #include "photo_editor_library_host.h"
 
 #include "photo_editor_gles2_simulator.h"
-#include "src/gles2_proc_table.h"
+#include "framework/backend/win_angle_d3d11/gles2_proc_table.h"
 
 #include <mutex>
 

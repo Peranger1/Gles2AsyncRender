@@ -4,7 +4,7 @@
 >
 > 这份文档描述的是当前分支已经落地的主方案，而不是待实现的替代方案。
 >
-> 当前 `Qt 5.15.1 + ANGLE + GLES2 + QOpenGLWidget` 分支已经收敛到 D3D11 native shared texture 方案，默认无参主入口是 `D3D11NativeDemoWindow`。
+> 当前 `Qt 5.15.1 + ANGLE + GLES2 + QOpenGLWidget` 分支已经收敛到 D3D11 native shared texture 方案，默认无参主入口是 `AsyncRenderMainWindow`。
 >
 > 旧的共享 `QOpenGLContext` worker 路径和阶段验证 harness 已经从主工程代码中移除。
 >

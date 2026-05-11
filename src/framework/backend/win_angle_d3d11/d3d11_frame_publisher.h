@@ -12,11 +12,11 @@
 class AngleStandaloneRuntime;
 class ISharedFrameSlotPool;
 
-class D3D11StandalonePublishBridge final : public IFramePublisher
+class D3D11FramePublisher final : public IFramePublisher
 {
 public:
-    D3D11StandalonePublishBridge();
-    ~D3D11StandalonePublishBridge();
+    D3D11FramePublisher();
+    ~D3D11FramePublisher();
 
     bool initialize(AngleStandaloneRuntime *runtime,
                     ISharedFrameSlotPool *slotPool,

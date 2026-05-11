@@ -35,18 +35,18 @@
 
 当前代码中已经接近框架层的模块包括：
 
-- [src/angle_standalone_runtime.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/angle_standalone_runtime.h:1)
-- [src/gles2_proc_table.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/gles2_proc_table.h:1)
-- [src/d3d11_standalone_publish_bridge.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/d3d11_standalone_publish_bridge.h:1)
-- [src/d3d11_native_slot_pool.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/d3d11_native_slot_pool.h:1)
-- [src/qt_angle_egl_tools.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/qt_angle_egl_tools.h:1)
+- [src/framework/backend/win_angle_d3d11/angle_standalone_runtime.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/backend/win_angle_d3d11/angle_standalone_runtime.h:1)
+- [src/framework/backend/win_angle_d3d11/gles2_proc_table.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/backend/win_angle_d3d11/gles2_proc_table.h:1)
+- [src/framework/backend/win_angle_d3d11/d3d11_frame_publisher.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/backend/win_angle_d3d11/d3d11_frame_publisher.h:1)
+- [src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h:1)
+- [src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h:1)
 
 当前仍然混合了框架职责和业务职责的模块包括：
 
 - [src/d3d11_native_worker.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/d3d11_native_worker.h:1)
 - [src/d3d11_native_worker.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/d3d11_native_worker.cpp:1)
-- [src/d3d11_import_widget.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/d3d11_import_widget.h:1)
-- [src/d3d11_import_widget.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/d3d11_import_widget.cpp:1)
+- [src/framework/qt/qopenglwidget_frame_view.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/qt/qopenglwidget_frame_view.h:1)
+- [src/framework/qt/qopenglwidget_frame_view.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/qt/qopenglwidget_frame_view.cpp:1)
 - [src/photo_editor_session.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor_session.h:1)
 - [src/photo_editor_library_host.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor_library_host.h:1)
 
@@ -169,7 +169,7 @@ src/
       photo_editor_render_session.h/.cpp
       photo_editor_library_host.h/.cpp
   app/
-    d3d11_native_demo_window.h/.cpp
+    async_render_main_window.h/.cpp
 ```
 
 第一阶段不要求一次性把所有文件移动到上述目录，但新增代码应优先按这个结构放置。
@@ -276,7 +276,7 @@ public:
 };
 ```
 
-Windows 首个实现应直接由当前 `D3D11StandalonePublishBridge` 演化而来。
+Windows 首个实现应直接由当前 `D3D11FramePublisher` 演化而来。
 
 ### 5.5 显示接入接口
 
@@ -371,12 +371,12 @@ enum class ExecutorState
   - 独立 D3D11 device
   - 独立 EGLDisplay / EGLContext / pbuffer
   - 统一 proc table
-- `D3D11StandalonePublishBridge`
+- `D3D11FramePublisher`
   - shared texture slot 资源
   - GPU publish + CPU fallback
-- `D3D11NativeSlotPool`
+- `D3D11SharedSlotPool`
   - `Free / Rendering / Pending`
-- `D3D11ImportWidget::copyFrameToDisplayTexture()`
+- `QOpenGLWidgetFrameView::copyFrameToDisplayTexture()`
   - keyed mutex acquire/release
   - `eglBindTexImage`
   - local display copy
@@ -385,13 +385,13 @@ enum class ExecutorState
 
 建议逐步进行如下调整：
 
-- `D3D11NativeSlotPool`
-  - 改名为 `D3D11SharedSlotPool`
+- `D3D11SharedSlotPool`
+  - 已完成从 `D3D11NativeSlotPool` 的命名收敛
   - 明确它是框架 backend 层对象，不再带 `NativeWorker` 语义
-- `D3D11StandalonePublishBridge`
-  - 改名为 `D3D11FramePublisher`
-  - 让类名体现“frame publisher”而不是“bridge”
-- `D3D11ImportWidget` 中的 import/copy 逻辑
+- `D3D11FramePublisher`
+  - 已完成从 `D3D11StandalonePublishBridge` 的命名收敛
+  - 类名直接体现“frame publisher”而不是“bridge”
+- `QOpenGLWidgetFrameView` 中的 import/copy 逻辑
   - 下沉为 `QtAngleFramePresenter`
   - widget 本身只保留外壳职责
 
@@ -415,7 +415,7 @@ enum class ExecutorState
 
 ### 8.1 当前问题
 
-现在的 `D3D11ImportWidget` 同时承担了：
+现在的 `QOpenGLWidgetFrameView` 同时承担了：
 
 - `QOpenGLWidget` 生命周期
 - Qt ANGLE/EGL 运行时探测
@@ -520,7 +520,7 @@ enum class ExecutorState
 
 1. 新增 `framework/core/async_render_types.h`
 2. 新增 `IRenderRuntime`、`IAsyncRenderSession`、`IFramePublisher`、`IDisplayHost`、`IFramePresenter`
-3. 让现有 `AngleStandaloneRuntime`、`D3D11StandalonePublishBridge` 在不改行为的前提下适配这些接口
+3. 让现有 `AngleStandaloneRuntime`、`D3D11FramePublisher` 在不改行为的前提下适配这些接口
 
 阶段完成标准：
 
@@ -549,14 +549,14 @@ enum class ExecutorState
 
 目标：
 
-- 把 `D3D11ImportWidget` 从“框架 + 控件”改为“控件壳 + presenter”
+- 把 `QOpenGLWidgetFrameView` 从“框架 + 控件”改为“控件壳 + presenter”
 
 步骤：
 
 1. 新增 `QOpenGLWidgetDisplayHost`
 2. 新增 `QtAngleFramePresenter`
 3. 把 `copyFrameToDisplayTexture()`、imported slot 管理、display texture 绘制迁入 presenter
-4. `D3D11ImportWidget` 只保留 widget 壳和信号转发
+4. `QOpenGLWidgetFrameView` 只保留 widget 壳和信号转发
 
 阶段完成标准：
 
