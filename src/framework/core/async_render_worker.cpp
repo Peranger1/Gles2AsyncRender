@@ -77,9 +77,21 @@ bool AsyncRenderWorker::initialize(ISharedFrameSlotPool *slotPool)
     m_slotPool = slotPool;
 
     QString error;
-    if (!m_runtime->initialize(&error)
-        || !m_session->initialize(*m_runtime, &error)
-        || !m_publisher->initialize(m_runtime.get(), slotPool, &error)
+    if (!m_runtime->initialize(&error) || !m_session->initialize(*m_runtime, &error)) {
+        emit workerFailed(error);
+        m_slotPool = nullptr;
+        return false;
+    }
+
+    if (!m_runtime->makeCurrent(&error)) {
+        emit workerFailed(error);
+        m_slotPool = nullptr;
+        return false;
+    }
+
+    const bool publisherReady = m_publisher->initialize(m_runtime.get(), slotPool, &error);
+    m_runtime->doneCurrent(nullptr);
+    if (!publisherReady
         || !m_executor.initialize(m_runtime.get(), m_session.get(), m_publisher.get(), slotPool, &error)) {
         emit workerFailed(error);
         m_slotPool = nullptr;
