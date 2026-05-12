@@ -1,7 +1,7 @@
 #include "photo_editor_render_session.h"
 
 #include "photo_editor_render_payload.h"
-#include "src/photo_editor_gles2_simulator.h"
+#include "photo_editor_gles2_simulator.h"
 
 namespace
 {

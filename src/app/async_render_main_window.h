@@ -10,7 +10,7 @@
 class QAction;
 class QOpenGLWidgetFrameView;
 class D3D11SharedSlotPool;
-class D3D11NativeWorker;
+class PhotoEditorAsyncRenderFacade;
 class QLabel;
 class QDockWidget;
 class QPushButton;
@@ -53,7 +53,7 @@ private:
 
     QOpenGLWidgetFrameView *m_displayWidget = nullptr;
     std::shared_ptr<D3D11SharedSlotPool> m_slotPool;
-    D3D11NativeWorker *m_worker = nullptr;
+    PhotoEditorAsyncRenderFacade *m_worker = nullptr;
     QThread m_workerThread;
 
     QAction *m_openDirectoryAction = nullptr;

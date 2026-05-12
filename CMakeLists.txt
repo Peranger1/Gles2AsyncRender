@@ -16,10 +16,10 @@ add_executable(Gles2AsyncRender
     src/adapters/photo_editor/photo_editor_render_payload.h
     src/adapters/photo_editor/photo_editor_render_session.cpp
     src/adapters/photo_editor/photo_editor_render_session.h
+    src/app/photo_editor_async_render_facade.cpp
+    src/app/photo_editor_async_render_facade.h
     src/angle_threading.cpp
     src/angle_threading.h
-    src/d3d11_native_worker.cpp
-    src/d3d11_native_worker.h
     src/app/async_render_main_window.cpp
     src/app/async_render_main_window.h
     src/framework/backend/win_angle_d3d11/angle_standalone_runtime.cpp
@@ -37,6 +37,8 @@ add_executable(Gles2AsyncRender
     src/framework/core/async_render_executor.h
     src/framework/core/async_render_session.h
     src/framework/core/async_render_types.h
+    src/framework/core/async_render_worker.cpp
+    src/framework/core/async_render_worker.h
     src/framework/core/display_presenter.h
     src/framework/core/frame_publisher.h
     src/framework/core/render_runtime.h

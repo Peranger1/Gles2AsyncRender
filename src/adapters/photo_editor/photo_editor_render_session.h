@@ -1,8 +1,8 @@
 #pragma once
 
-#include "src/framework/core/async_render_session.h"
-#include "src/photo_editor_library_host.h"
-#include "src/photo_editor_session.h"
+#include "framework/core/async_render_session.h"
+#include "photo_editor_library_host.h"
+#include "photo_editor_session.h"
 
 #include <QImage>
 #include <QString>

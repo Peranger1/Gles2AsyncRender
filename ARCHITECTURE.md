@@ -27,7 +27,8 @@ flowchart LR
     WIN["AsyncRenderMainWindow"]
     WGT["QOpenGLWidgetFrameView"]
     WK["Worker 线程"]
-    WRK["D3D11NativeWorker"]
+    FAC["PhotoEditorAsyncRenderFacade"]
+    WRK["AsyncRenderWorker"]
     ALG["PhotoEditorSession / 算法库"]
     RT["AngleStandaloneRuntime"]
     PUB["D3D11FramePublisher"]
@@ -36,7 +37,8 @@ flowchart LR
     LOCAL["UI 本地显示纹理"]
 
     UI --> WIN --> WGT
-    WIN --> WRK
+    WIN --> FAC
+    FAC --> WRK
     WGT --> WIN
     WRK --> ALG
     WRK --> RT
@@ -72,12 +74,17 @@ flowchart LR
 - 把导入帧复制到本地 UI 纹理
 - 常规绘制时只画本地 UI 纹理
 
-### `src/d3d11_native_worker.*`
+### `src/app/photo_editor_async_render_facade.*`
 
-- 持有 worker 侧状态机
-- 创建和管理 standalone ANGLE 运行时
-- 初始化算法宿主和发布桥
+- 持有图片编辑业务状态
 - 加载图片目录并切换当前图片
+- 把 UI 参数和图片输入收敛成 `AsyncRenderRequest`
+- 作为 app 层 facade 转发给通用 worker
+
+### `src/framework/core/async_render_worker.*`
+
+- 持有 worker 侧通用状态机
+- 创建和管理 standalone runtime、render session、publisher
 - 异步运行处理并把完成帧发布到 slot pool
 
 ### `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
@@ -184,7 +191,8 @@ sequenceDiagram
     participant UI as "UI 线程"
     participant Win as "AsyncRenderMainWindow"
     participant Wgt as "QOpenGLWidgetFrameView"
-    participant Wkr as "Worker 线程 / D3D11NativeWorker"
+    participant Fac as "Worker 线程 / PhotoEditorAsyncRenderFacade"
+    participant Wkr as "Worker 线程 / AsyncRenderWorker"
     participant RT as "AngleStandaloneRuntime"
     participant Alg as "PhotoEditorSession"
     participant Pub as "D3D11FramePublisher"
@@ -194,13 +202,15 @@ sequenceDiagram
     Wgt->>Wgt: 解析 Qt 持有的 ANGLE/EGL
     Wgt-->>Win: glInitialized()
     Wgt-->>Win: frameSwapped()
-    Win->>Wkr: initialize(slotPool, outputSize)
+    Win->>Fac: initialize(slotPool, outputSize)
+    Fac->>Wkr: configure + initialize
     Wkr->>RT: 创建独立 D3D11/ANGLE 运行时
     Wkr->>Pub: initialize(runtime, slotPool)
     Wkr->>Alg: 准备会话
 
     UI->>Win: 打开图片 / 修改参数 / 请求渲染
-    Win->>Wkr: queued 命令
+    Win->>Fac: queued 命令
+    Fac->>Wkr: latest request
     Wkr->>Alg: process()
     Alg-->>Wkr: 进度回调
     Wkr->>Alg: render()

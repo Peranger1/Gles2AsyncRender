@@ -1,6 +1,6 @@
 #pragma once
 
-#include "src/image_effect_types.h"
+#include "image_effect_types.h"
 
 #include <QImage>
 #include <QString>

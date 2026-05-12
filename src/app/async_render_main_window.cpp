@@ -1,7 +1,7 @@
 #include "async_render_main_window.h"
 
+#include "app/photo_editor_async_render_facade.h"
 #include "framework/qt/qopenglwidget_frame_view.h"
-#include "d3d11_native_worker.h"
 #include "framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h"
 #include "framework/core/shared_frame_slot_pool.h"
 #include "runtime_diagnostics.h"
@@ -42,7 +42,7 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_displayWidget(new QOpenGLWidgetFrameView(this))
     , m_slotPool(std::make_shared<D3D11SharedSlotPool>(3))
-    , m_worker(new D3D11NativeWorker())
+    , m_worker(new PhotoEditorAsyncRenderFacade())
 {
     setWindowTitle(QStringLiteral("Gles2AsyncRender"));
     resize(1280, 760);
@@ -50,7 +50,7 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     m_displayWidget->setSlotPool(m_slotPool);
     setCentralWidget(m_displayWidget);
 
-    m_workerThread.setObjectName(QStringLiteral("D3D11NativeWorkerThread"));
+    m_workerThread.setObjectName(QStringLiteral("PhotoEditorAsyncRenderFacadeThread"));
     m_worker->moveToThread(&m_workerThread);
     connect(&m_workerThread, &QThread::finished, m_worker, &QObject::deleteLater);
 
@@ -61,22 +61,22 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
             this, &AsyncRenderMainWindow::onDisplayReadyForWorker,
             Qt::QueuedConnection);
     connect(m_displayWidget, &QOpenGLWidgetFrameView::slotAvailableForWorker,
-            m_worker, &D3D11NativeWorker::onSlotAvailableForWorker,
+            m_worker, &PhotoEditorAsyncRenderFacade::onSlotAvailable,
             Qt::QueuedConnection);
     connect(m_displayWidget, &QOpenGLWidgetFrameView::outputSizeChanged,
-            m_worker, &D3D11NativeWorker::setOutputSize,
+            m_worker, &PhotoEditorAsyncRenderFacade::setOutputSize,
             Qt::QueuedConnection);
 
-    connect(m_worker, &D3D11NativeWorker::frameReady,
+    connect(m_worker, &PhotoEditorAsyncRenderFacade::frameReady,
             m_displayWidget, &QOpenGLWidgetFrameView::onFrameReady,
             Qt::QueuedConnection);
-    connect(m_worker, &D3D11NativeWorker::initializationFailed,
+    connect(m_worker, &PhotoEditorAsyncRenderFacade::initializationFailed,
             this, &AsyncRenderMainWindow::onWorkerError,
             Qt::QueuedConnection);
-    connect(m_worker, &D3D11NativeWorker::imageDirectoryLoadFinished,
+    connect(m_worker, &PhotoEditorAsyncRenderFacade::imageDirectoryLoadFinished,
             this, &AsyncRenderMainWindow::onImageDirectoryLoadFinished,
             Qt::QueuedConnection);
-    connect(m_worker, &D3D11NativeWorker::imageSelectionChanged,
+    connect(m_worker, &PhotoEditorAsyncRenderFacade::imageSelectionChanged,
             this, &AsyncRenderMainWindow::onImageSelectionChanged,
             Qt::QueuedConnection);
 

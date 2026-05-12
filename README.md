@@ -54,7 +54,7 @@
 - `src/app/async_render_main_window.*`
   - 当前默认主窗口入口
   - 提供菜单、精简状态栏和参数控制面板
-  - 创建并管理 D3D11 worker 线程
+  - 创建并管理 app facade / generic worker 线程
   - 响应“打开目录 / 切图 / 调参 / 请求重绘”
 
 - `src/framework/qt/qopenglwidget_frame_view.*`
@@ -67,20 +67,23 @@
   - 管理 `free / rendering / pending` 的 slot 生命周期
   - 保证 UI 不会读取正在写入的 slot，worker 也不会覆盖尚未消费完成的 pending slot
 
-- `src/d3d11_native_worker.*`
-  - 当前默认生产者
-  - 独占 D3D11 device / immediate context
-  - 创建 shared texture + keyed mutex
+- `src/app/photo_editor_async_render_facade.*`
+  - 当前图片编辑 app facade
   - 接收目录加载、切图、参数变化和重绘请求
-  - 把处理结果写入 slot 对应的 shared texture
+  - 把 UI 语义收敛成统一 `AsyncRenderRequest`
+
+- `src/framework/core/async_render_worker.*`
+  - 当前通用异步执行 worker
+  - 独占 runtime / session / publisher / executor 的编排
+  - 负责 process、publish、slot wait 和 frame ready 流转
 
 ## 当前渲染流程
 
 当前渲染链路如下：
 
 1. `QOpenGLWidgetFrameView` 初始化显示侧 OpenGL ES / ANGLE 上下文
-2. 等显示侧首帧准备完成后，再初始化 `D3D11NativeWorker`
-3. worker 创建 D3D11 device / context、slot pool、shared texture 和 keyed mutex
+2. 等显示侧首帧准备完成后，再初始化 `PhotoEditorAsyncRenderFacade`
+3. facade 配置 `AsyncRenderWorker`，worker 创建 runtime、session、publisher 和 slot 交接链路
 4. 用户导入图片目录后，worker 加载首张图片并上传 D3D11 源纹理
 5. worker 获取可用 render slot，并把处理结果写入当前 slot 对应的 shared texture
 6. worker 将新帧提交为 `pending`

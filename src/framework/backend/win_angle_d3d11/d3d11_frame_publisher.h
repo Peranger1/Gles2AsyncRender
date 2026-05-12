@@ -18,9 +18,9 @@ public:
     D3D11FramePublisher();
     ~D3D11FramePublisher();
 
-    bool initialize(AngleStandaloneRuntime *runtime,
+    bool initialize(IRenderRuntime *runtime,
                     ISharedFrameSlotPool *slotPool,
-                    QString *error);
+                    QString *error) override;
 
     bool publishToSlot(GLuint sourceTextureId,
                        const QSize &sourceSize,

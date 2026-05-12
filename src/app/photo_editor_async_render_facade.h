@@ -1,5 +1,6 @@
 #pragma once
 
+#include "framework/core/async_render_types.h"
 #include "image_effect_types.h"
 
 #include <QObject>
@@ -7,15 +8,16 @@
 #include <QSize>
 #include <memory>
 
+class AsyncRenderWorker;
 class ISharedFrameSlotPool;
 
-class D3D11NativeWorker final : public QObject
+class PhotoEditorAsyncRenderFacade final : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit D3D11NativeWorker(QObject *parent = nullptr);
-    ~D3D11NativeWorker() override;
+    explicit PhotoEditorAsyncRenderFacade(QObject *parent = nullptr);
+    ~PhotoEditorAsyncRenderFacade() override;
 
 public slots:
     bool initialize(ISharedFrameSlotPool *slotPool, QSize outputSize);
@@ -25,7 +27,7 @@ public slots:
     void selectNextImage();
     void selectPreviousImage();
     void requestRender();
-    void onSlotAvailableForWorker();
+    void onSlotAvailable();
     void shutdown();
 
 signals:
@@ -41,28 +43,19 @@ signals:
     void processingProgressChanged(int progress);
 
 private:
-    struct Impl;
+    struct ImageCatalogState;
 
-    QSize currentOutputSize() const;
-    ImageEffectParameters currentEffectParameters() const;
-    void enqueueLatestRenderRequest();
-    void schedulePump(int delayMs = 0);
     void emitImageSelection();
-    void pumpRender();
+    void submitLatestRequest();
+    AsyncRenderRequest buildLatestRequest() const;
 
-private slots:
-    void onProcessProgressEvent(int progress, bool isEnd);
-
-private:
-    std::unique_ptr<Impl> m_impl;
+    std::unique_ptr<ImageCatalogState> m_catalog;
+    AsyncRenderWorker *m_worker = nullptr;
     ISharedFrameSlotPool *m_slotPool = nullptr;
     ImageEffectParameters m_effectParameters;
     QSize m_outputSize;
     bool m_initialized = false;
-    bool m_renderScheduled = false;
     bool m_shuttingDown = false;
-    bool m_waitingForFreeSlot = false;
-    quint64 m_frameIndex = 0;
-    quint64 m_requestSequence = 0;
+    mutable quint64 m_requestSequence = 0;
     mutable QMutex m_stateMutex;
 };

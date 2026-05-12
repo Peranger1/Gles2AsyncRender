@@ -770,11 +770,19 @@ D3D11FramePublisher::D3D11FramePublisher()
 
 D3D11FramePublisher::~D3D11FramePublisher() = default;
 
-bool D3D11FramePublisher::initialize(AngleStandaloneRuntime *runtime,
+bool D3D11FramePublisher::initialize(IRenderRuntime *runtime,
                                      ISharedFrameSlotPool *slotPool,
                                      QString *error)
 {
-    return m_impl->initialize(runtime, slotPool, error);
+    auto *standaloneRuntime = dynamic_cast<AngleStandaloneRuntime *>(runtime);
+    if (standaloneRuntime == nullptr) {
+        if (error) {
+            *error = QStringLiteral("D3D11FramePublisher requires an AngleStandaloneRuntime.");
+        }
+        return false;
+    }
+
+    return m_impl->initialize(standaloneRuntime, slotPool, error);
 }
 
 bool D3D11FramePublisher::publishToSlot(GLuint sourceTextureId,
