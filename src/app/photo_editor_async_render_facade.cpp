@@ -1,10 +1,12 @@
 #include "photo_editor_async_render_facade.h"
 
 #include "adapters/photo_editor/photo_editor_render_payload.h"
-#include "adapters/photo_editor/photo_editor_render_session.h"
+#include "adapters/photo_editor/photo_editor_work_processor.h"
 #include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
 #include "framework/backend/win_angle_d3d11/d3d11_frame_publisher.h"
-#include "framework/core/async_render_worker.h"
+#include "framework/core/async_pipeline.h"
+#include "framework/core/latest_only_async_pipeline.h"
+#include "framework/core/latest_only_work_scheduler.h"
 #include "framework/core/shared_frame_slot_pool.h"
 #include "runtime_diagnostics.h"
 
@@ -114,14 +116,7 @@ struct PhotoEditorAsyncRenderFacade::ImageCatalogState final
 PhotoEditorAsyncRenderFacade::PhotoEditorAsyncRenderFacade(QObject *parent)
     : QObject(parent)
     , m_catalog(std::make_unique<ImageCatalogState>())
-    , m_worker(new AsyncRenderWorker(this))
 {
-    connect(m_worker, &AsyncRenderWorker::frameReady,
-            this, &PhotoEditorAsyncRenderFacade::frameReady);
-    connect(m_worker, &AsyncRenderWorker::workerFailed,
-            this, &PhotoEditorAsyncRenderFacade::initializationFailed);
-    connect(m_worker, &AsyncRenderWorker::processingProgressChanged,
-            this, &PhotoEditorAsyncRenderFacade::processingProgressChanged);
 }
 
 PhotoEditorAsyncRenderFacade::~PhotoEditorAsyncRenderFacade()
@@ -138,23 +133,40 @@ bool PhotoEditorAsyncRenderFacade::initialize(ISharedFrameSlotPool *slotPool, QS
     m_slotPool = slotPool;
     m_outputSize = sanitizedSize(outputSize);
 
+    m_runtime = std::make_unique<AngleStandaloneRuntime>();
+    m_processor = std::make_unique<PhotoEditorWorkProcessor>();
+    m_publisher = std::make_unique<D3D11FramePublisher>();
+    m_scheduler = std::make_unique<LatestOnlyWorkScheduler>();
+    m_pipeline = std::make_unique<LatestOnlyAsyncPipeline>();
+    m_publisher->setSlotPool(slotPool);
+
+    m_pipeline->setProgressCallback([this](quint64 workId, int progress, bool isFinal) {
+        Q_UNUSED(workId);
+        handleProgress(workId, progress, isFinal);
+    });
+    m_pipeline->setFrameReadyCallback([this](const PublicationTicket &ticket) {
+        handleFrameReady(ticket);
+    });
+    m_pipeline->setErrorCallback([this](const QString &reason) {
+        handlePipelineError(reason);
+    });
+
     QString error;
-    if (!m_worker->configure(std::make_unique<AngleStandaloneRuntime>(),
-                             std::make_unique<PhotoEditorRenderSession>(),
-                             std::make_unique<D3D11FramePublisher>(),
-                             &error)
-        || !m_worker->initialize(slotPool)) {
-        if (!error.isEmpty()) {
-            emit initializationFailed(error);
-        }
-        m_slotPool = nullptr;
+    if (!m_pipeline->initialize(m_runtime.get(),
+                                m_processor.get(),
+                                m_publisher.get(),
+                                m_scheduler.get(),
+                                &error)) {
+        handlePipelineError(error);
+        shutdown();
         return false;
     }
 
+    m_slotPool->reset();
     m_initialized = true;
     m_shuttingDown = false;
     m_requestSequence = 0;
-    logFacadeMessage(QStringLiteral("Initialized. App facade now forwards requests to a generic async render worker."));
+    logFacadeMessage(QStringLiteral("Initialized. App facade now forwards requests to the generic async pipeline."));
     return true;
 }
 
@@ -276,17 +288,17 @@ void PhotoEditorAsyncRenderFacade::selectPreviousImage()
 
 void PhotoEditorAsyncRenderFacade::requestRender()
 {
-    if (!m_initialized || m_shuttingDown || !m_catalog->hasImage()) {
+    if (!m_initialized || m_shuttingDown || !m_catalog->hasImage() || !m_pipeline) {
         return;
     }
 
-    m_worker->requestRender();
+    m_pipeline->pump();
 }
 
-void PhotoEditorAsyncRenderFacade::onSlotAvailable()
+void PhotoEditorAsyncRenderFacade::onPublicationCapacityAvailable()
 {
-    if (m_worker != nullptr) {
-        m_worker->onSlotAvailable();
+    if (m_pipeline) {
+        m_pipeline->onPublicationCapacityAvailable();
     }
 }
 
@@ -300,12 +312,51 @@ void PhotoEditorAsyncRenderFacade::shutdown()
     m_initialized = false;
     m_requestSequence = 0;
 
-    if (m_worker) {
-        m_worker->shutdown();
+    if (m_pipeline) {
+        m_pipeline->shutdown();
     }
 
+    m_pipeline.reset();
+    m_scheduler.reset();
+    m_publisher.reset();
+    m_processor.reset();
+    m_runtime.reset();
     m_slotPool = nullptr;
     m_catalog = std::make_unique<ImageCatalogState>();
+}
+
+void PhotoEditorAsyncRenderFacade::handleProgress(quint64 workId, int progress, bool isFinal)
+{
+    Q_UNUSED(workId);
+    Q_UNUSED(isFinal);
+    if (!m_shuttingDown) {
+        emit processingProgressChanged(progress);
+    }
+}
+
+void PhotoEditorAsyncRenderFacade::handleFrameReady(const PublicationTicket &ticket)
+{
+    if (m_shuttingDown) {
+        return;
+    }
+
+    const int slotIndex = ticket.transportMetadata.value(QStringLiteral("slotIndex"), -1).toInt();
+    const quint64 generation = ticket.transportMetadata.value(QStringLiteral("generation")).toULongLong();
+    const quint64 frameIndex = ticket.transportMetadata.value(QStringLiteral("frameIndex")).toULongLong();
+    const QSize size = ticket.transportMetadata.value(QStringLiteral("size")).toSize().isValid()
+        ? ticket.transportMetadata.value(QStringLiteral("size")).toSize()
+        : ticket.artifact.logicalSize;
+    emit frameReady(slotIndex, generation, size, frameIndex);
+}
+
+void PhotoEditorAsyncRenderFacade::handlePipelineError(const QString &reason)
+{
+    if (m_shuttingDown || reason.isEmpty()) {
+        return;
+    }
+
+    logFacadeMessage(QStringLiteral("Pipeline error: %1").arg(reason));
+    emit initializationFailed(reason);
 }
 
 void PhotoEditorAsyncRenderFacade::emitImageSelection()
@@ -323,26 +374,29 @@ void PhotoEditorAsyncRenderFacade::emitImageSelection()
 
 void PhotoEditorAsyncRenderFacade::submitLatestRequest()
 {
-    if (!m_initialized || !m_catalog->hasImage()) {
+    if (!m_initialized || !m_catalog->hasImage() || !m_pipeline) {
         return;
     }
 
-    m_worker->submitLatestRequest(buildLatestRequest());
+    m_pipeline->submit(buildLatestWork());
 }
 
-AsyncRenderRequest PhotoEditorAsyncRenderFacade::buildLatestRequest() const
+WorkEnvelope PhotoEditorAsyncRenderFacade::buildLatestWork() const
 {
     QMutexLocker locker(&m_stateMutex);
 
-    AsyncRenderRequest request;
-    request.sequence = ++m_requestSequence;
-    request.outputSize = m_outputSize;
+    WorkEnvelope work;
+    work.workId = ++m_requestSequence;
+    work.streamKey = QStringLiteral("photo_editor.preview");
+    work.workflowKey = QStringLiteral("photo_editor.process");
+    work.coalescing = CoalescingPolicy::LatestOnly;
+    work.hints.insert(QStringLiteral("outputSize"), m_outputSize);
 
     auto payload = std::make_shared<PhotoEditorRenderPayload>();
     payload->sourceKey = m_catalog->currentImagePath;
     payload->sourceImageCacheKey = m_catalog->currentImage.cacheKey();
     payload->sourceImage = m_catalog->currentImage;
     payload->parameters = m_effectParameters;
-    request.payload = payload;
-    return request;
+    work.payload = payload;
+    return work;
 }

@@ -72,6 +72,58 @@ void QtAngleDisplayPresenter::setSlotPool(const std::shared_ptr<ISharedFrameSlot
     m_importedSlots.resize(slotPool ? slotPool->slotCount() : 0);
 }
 
+QString QtAngleDisplayPresenter::lastRuntimeLog() const
+{
+    return m_runtimeLog;
+}
+
+bool QtAngleDisplayPresenter::initialize(IPresentationTarget &target, QString *error)
+{
+    auto *glTarget = dynamic_cast<IGlPresentationTarget *>(&target);
+    if (glTarget == nullptr) {
+        if (error) {
+            *error = QStringLiteral("QtAngleDisplayPresenter requires a GL-capable presentation target.");
+        }
+        return false;
+    }
+
+    QString runtimeLog;
+    const bool ok = initialize(glTarget, error, &runtimeLog);
+    m_runtimeLog = runtimeLog;
+    return ok;
+}
+
+bool QtAngleDisplayPresenter::enqueue(const PublicationTicket &ticket, QString *error)
+{
+    Q_UNUSED(error);
+
+    PublishedFrame frame;
+    frame.slotIndex = ticket.transportMetadata.value(QStringLiteral("slotIndex"), -1).toInt();
+    frame.sharedHandle = ticket.transportMetadata.value(QStringLiteral("sharedHandle")).toULongLong();
+    frame.size = ticket.transportMetadata.value(QStringLiteral("size")).toSize().isValid()
+        ? ticket.transportMetadata.value(QStringLiteral("size")).toSize()
+        : ticket.artifact.logicalSize;
+    frame.generation = ticket.transportMetadata.value(QStringLiteral("generation")).toULongLong();
+    frame.frameIndex = ticket.transportMetadata.value(QStringLiteral("frameIndex")).toULongLong();
+    if (frame.slotIndex < 0) {
+        if (error) {
+            *error = QStringLiteral("Publication ticket is missing a valid slot index.");
+        }
+        return false;
+    }
+
+    consume(frame);
+    if (m_target != nullptr) {
+        m_target->requestPresent();
+    }
+    return true;
+}
+
+bool QtAngleDisplayPresenter::present(PresentationFeedback *feedback, QString *error)
+{
+    return paint(feedback, error);
+}
+
 void QtAngleDisplayPresenter::shutdown()
 {
     if (!m_gl) {
@@ -89,19 +141,19 @@ void QtAngleDisplayPresenter::shutdown()
     m_eglConfig = nullptr;
 }
 
-bool QtAngleDisplayPresenter::initialize(IDisplayHost *host,
+bool QtAngleDisplayPresenter::initialize(IGlPresentationTarget *target,
                                          QString *error,
                                          QString *runtimeLog)
 {
-    if (host == nullptr) {
+    if (target == nullptr) {
         if (error) {
-            *error = QStringLiteral("QtAngleDisplayPresenter requires a valid display host.");
+            *error = QStringLiteral("QtAngleDisplayPresenter requires a valid GL presentation target.");
         }
         return false;
     }
 
-    QOpenGLContext *context = host->glContext();
-    QOpenGLFunctions *functions = host->glFunctions();
+    QOpenGLContext *context = target->glContext();
+    QOpenGLFunctions *functions = target->glFunctions();
     if (context == nullptr || functions == nullptr) {
         if (error) {
             *error = QStringLiteral("QtAngleDisplayPresenter requires a valid GL context and function table.");
@@ -109,7 +161,7 @@ bool QtAngleDisplayPresenter::initialize(IDisplayHost *host,
         return false;
     }
 
-    m_host = host;
+    m_target = target;
     m_gl = functions;
 
     if (!createProgram(error)) {
@@ -169,7 +221,7 @@ bool QtAngleDisplayPresenter::initialize(IDisplayHost *host,
     }
 
     m_initialized = true;
-    onOutputSizeChanged(m_host->outputPixelSize());
+    onOutputSizeChanged(m_target->targetSize());
     return true;
 }
 
@@ -190,20 +242,20 @@ void QtAngleDisplayPresenter::consume(const PublishedFrame &frame)
     m_hasPendingFrame = true;
 }
 
-bool QtAngleDisplayPresenter::paint(QString *error, bool *releasedSlotForWorker)
+bool QtAngleDisplayPresenter::paint(PresentationFeedback *feedback, QString *error)
 {
-    if (releasedSlotForWorker) {
-        *releasedSlotForWorker = false;
+    if (feedback != nullptr) {
+        feedback->releasedPublicationCapacity = false;
     }
 
-    if (!m_gl || m_host == nullptr) {
+    if (!m_gl || m_target == nullptr) {
         if (error) {
-            *error = QStringLiteral("QtAngleDisplayPresenter is missing a valid display host or GL functions.");
+            *error = QStringLiteral("QtAngleDisplayPresenter is missing a valid GL presentation target or GL functions.");
         }
         return false;
     }
 
-    const QSize viewportSize = m_host->outputPixelSize();
+    const QSize viewportSize = m_target->targetSize();
     m_gl->glViewport(0, 0, viewportSize.width(), viewportSize.height());
     m_gl->glClear(GL_COLOR_BUFFER_BIT);
 
@@ -214,8 +266,8 @@ bool QtAngleDisplayPresenter::paint(QString *error, bool *releasedSlotForWorker)
             if (m_slotPool) {
                 m_slotPool->releasePendingSlot(pendingFrame.slotIndex);
             }
-            if (releasedSlotForWorker) {
-                *releasedSlotForWorker = true;
+            if (feedback != nullptr) {
+                feedback->releasedPublicationCapacity = true;
             }
             if (copied) {
                 m_displayFrame = pendingFrame;

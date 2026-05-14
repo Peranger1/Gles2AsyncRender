@@ -28,8 +28,10 @@ flowchart LR
     WGT["QOpenGLWidgetFrameView"]
     WK["Worker 线程"]
     FAC["PhotoEditorAsyncRenderFacade"]
-    WRK["AsyncRenderWorker"]
-    ALG["PhotoEditorSession / 算法库"]
+    PIPE["LatestOnlyAsyncPipeline"]
+    SCHED["LatestOnlyWorkScheduler"]
+    PROC["PhotoEditorWorkProcessor"]
+    ALG["PhotoEditorRenderSession / 算法库"]
     RT["AngleStandaloneRuntime"]
     PUB["D3D11FramePublisher"]
     POOL["D3D11SharedSlotPool"]
@@ -38,12 +40,14 @@ flowchart LR
 
     UI --> WIN --> WGT
     WIN --> FAC
-    FAC --> WRK
+    FAC --> PIPE
     WGT --> WIN
-    WRK --> ALG
-    WRK --> RT
-    WRK --> PUB
-    WRK --> POOL
+    PIPE --> SCHED
+    PIPE --> PROC
+    PIPE --> RT
+    PIPE --> PUB
+    PROC --> ALG
+    PUB --> POOL
     PUB --> SHARED
     WGT --> SHARED
     WGT --> LOCAL
@@ -78,14 +82,25 @@ flowchart LR
 
 - 持有图片编辑业务状态
 - 加载图片目录并切换当前图片
-- 把 UI 参数和图片输入收敛成 `AsyncRenderRequest`
-- 作为 app 层 facade 转发给通用 worker
+- 把 UI 参数和图片输入收敛成 `WorkEnvelope`
+- 作为 app 层 facade 转发给通用异步 pipeline
 
-### `src/framework/core/async_render_worker.*`
+### `src/framework/core/latest_only_async_pipeline.*`
 
-- 持有 worker 侧通用状态机
-- 创建和管理 standalone runtime、render session、publisher
-- 异步运行处理并把完成帧发布到 slot pool
+- 持有 worker 侧通用 latest-only 状态机
+- 创建和管理 runtime、processor、publisher、scheduler
+- 在 `work -> artifact -> publication` 三阶段间推进状态
+
+### `src/framework/core/latest_only_work_scheduler.*`
+
+- 管理 latest-only 请求收敛
+- 保证 UI 高频输入下只保留最新待处理 work
+
+### `src/adapters/photo_editor/photo_editor_work_processor.*`
+
+- 将图片编辑业务适配到通用 `IWorkProcessor`
+- 管理单次业务 work 的启动、进度、artifact 收集
+- 不负责 publication 和显示
 
 ### `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
 
@@ -143,6 +158,13 @@ flowchart LR
 
 这两套运行时不会共享同一个 GL context。它们唯一共享的是 D3D11 shared texture handle 以及围绕 handle 的 slot 元数据。
 
+### Runtime Scope 约束
+
+- `IWorkRuntime::enter()/leave()` 是 runtime-bound GPU 资源操作的唯一外层边界。
+- `IArtifactPublisher::initialize()/publish()/shutdown()` 必须在 pipeline 明确建立的 runtime scope 内执行。
+- 业务适配层如果内部自行调用 runtime scope，必须保证不破坏其后的组件初始化顺序。
+- 当前主链路已经移除了旧 worker 兼容层，初始化时序由 `LatestOnlyAsyncPipeline` 统一负责。
+
 ## 6. Slot 模型
 
 `D3D11SharedSlotPool` 是核心同步原语。
@@ -192,9 +214,10 @@ sequenceDiagram
     participant Win as "AsyncRenderMainWindow"
     participant Wgt as "QOpenGLWidgetFrameView"
     participant Fac as "Worker 线程 / PhotoEditorAsyncRenderFacade"
-    participant Wkr as "Worker 线程 / AsyncRenderWorker"
+    participant Pipe as "Worker 线程 / LatestOnlyAsyncPipeline"
+    participant Proc as "Worker 线程 / PhotoEditorWorkProcessor"
     participant RT as "AngleStandaloneRuntime"
-    participant Alg as "PhotoEditorSession"
+    participant Alg as "PhotoEditorRenderSession"
     participant Pub as "D3D11FramePublisher"
     participant Pool as "D3D11SharedSlotPool"
 
@@ -203,21 +226,24 @@ sequenceDiagram
     Wgt-->>Win: glInitialized()
     Wgt-->>Win: frameSwapped()
     Win->>Fac: initialize(slotPool, outputSize)
-    Fac->>Wkr: configure + initialize
-    Wkr->>RT: 创建独立 D3D11/ANGLE 运行时
-    Wkr->>Pub: initialize(runtime, slotPool)
-    Wkr->>Alg: 准备会话
+    Fac->>Pipe: initialize
+    Pipe->>RT: 创建独立 D3D11/ANGLE 运行时
+    Pipe->>Pub: initialize(runtime, slotPool)
+    Pipe->>Proc: initialize(runtime)
+    Proc->>Alg: 准备会话
 
     UI->>Win: 打开图片 / 修改参数 / 请求渲染
     Win->>Fac: queued 命令
-    Fac->>Wkr: latest request
-    Wkr->>Alg: process()
-    Alg-->>Wkr: 进度回调
-    Wkr->>Alg: render()
-    Wkr->>Pub: publishToSlot(texture, size, slot)
+    Fac->>Pipe: submit(work)
+    Pipe->>Proc: start(work)
+    Proc->>Alg: process()
+    Alg-->>Proc: 进度回调
+    Pipe->>Proc: collectIfReady()
+    Proc->>Alg: render()
+    Pipe->>Pub: publish(artifact)
     Pub->>Pool: 更新 slot 元数据
-    Pub-->>Wkr: 帧已发布
-    Wkr-->>Wgt: frameReady(slot, generation, size, frameIndex)
+    Pub-->>Pipe: publication ticket
+    Pipe-->>Wgt: frameReady(slot, generation, size, frameIndex)
 
     Wgt->>Wgt: paintGL()
     Wgt->>Pool: consumePendingFrame()

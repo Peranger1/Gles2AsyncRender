@@ -485,14 +485,14 @@ bool AngleStandaloneRuntime::initialize(QString *error)
     return m_impl->initialize(error);
 }
 
-bool AngleStandaloneRuntime::makeCurrent(QString *error)
+bool AngleStandaloneRuntime::enter(QString *error)
 {
     return m_impl->makeCurrent(error);
 }
 
-bool AngleStandaloneRuntime::doneCurrent(QString *error)
+void AngleStandaloneRuntime::leave()
 {
-    return m_impl->doneCurrent(error);
+    m_impl->doneCurrent(nullptr);
 }
 
 void AngleStandaloneRuntime::shutdown()

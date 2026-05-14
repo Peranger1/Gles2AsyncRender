@@ -174,11 +174,19 @@ struct D3D11FramePublisher::Impl final
             return false;
         }
 
+        logPublishDiag(QStringLiteral("[diag] Publisher initialize currentContext=%1 currentDisplay=%2 runtimeDisplay=%3")
+                           .arg(quintptr(gl.eglGetCurrentContext ? gl.eglGetCurrentContext() : EGL_NO_CONTEXT), 0, 16)
+                           .arg(quintptr(gl.eglGetCurrentDisplay ? gl.eglGetCurrentDisplay() : EGL_NO_DISPLAY), 0, 16)
+                           .arg(quintptr(runtime->eglDisplay()), 0, 16));
+
         gl.glGenFramebuffers(1, &publishFramebufferId);
         gl.glGenFramebuffers(1, &readbackFramebufferId);
         if (publishFramebufferId == 0U || readbackFramebufferId == 0U) {
             if (error) {
-                *error = QStringLiteral("Failed to create the standalone publish bridge framebuffers.");
+                *error = QStringLiteral("Failed to create the standalone publish bridge framebuffers. currentContext=%1 currentDisplay=%2 glError=%3")
+                             .arg(quintptr(gl.eglGetCurrentContext ? gl.eglGetCurrentContext() : EGL_NO_CONTEXT), 0, 16)
+                             .arg(quintptr(gl.eglGetCurrentDisplay ? gl.eglGetCurrentDisplay() : EGL_NO_DISPLAY), 0, 16)
+                             .arg(glErrorHex(gl.glGetError()));
             }
             return false;
         }
@@ -770,27 +778,101 @@ D3D11FramePublisher::D3D11FramePublisher()
 
 D3D11FramePublisher::~D3D11FramePublisher() = default;
 
-bool D3D11FramePublisher::initialize(IRenderRuntime *runtime,
-                                     ISharedFrameSlotPool *slotPool,
-                                     QString *error)
-{
-    auto *standaloneRuntime = dynamic_cast<AngleStandaloneRuntime *>(runtime);
-    if (standaloneRuntime == nullptr) {
-        if (error) {
-            *error = QStringLiteral("D3D11FramePublisher requires an AngleStandaloneRuntime.");
-        }
-        return false;
-    }
-
-    return m_impl->initialize(standaloneRuntime, slotPool, error);
-}
-
 bool D3D11FramePublisher::publishToSlot(GLuint sourceTextureId,
                                         const QSize &sourceSize,
                                         int slotIndex,
                                         QString *error)
 {
     return m_impl->publishToSlot(sourceTextureId, sourceSize, slotIndex, error);
+}
+
+bool D3D11FramePublisher::initialize(IWorkRuntime &runtime, QString *error)
+{
+    auto *standaloneRuntime = dynamic_cast<AngleStandaloneRuntime *>(&runtime);
+    if (standaloneRuntime == nullptr) {
+        if (error) {
+            *error = QStringLiteral("D3D11FramePublisher requires an AngleStandaloneRuntime.");
+        }
+        return false;
+    }
+    if (m_slotPool == nullptr) {
+        if (error) {
+            *error = QStringLiteral("D3D11FramePublisher requires a configured shared slot pool.");
+        }
+        return false;
+    }
+
+    m_runtime = standaloneRuntime;
+    return m_impl->initialize(standaloneRuntime, m_slotPool, error);
+}
+
+bool D3D11FramePublisher::publish(const WorkEnvelope &work,
+                                  const ArtifactSnapshot &artifact,
+                                  PublicationTicket *ticket,
+                                  QString *error)
+{
+    if (m_runtime == nullptr || m_slotPool == nullptr) {
+        if (error) {
+            *error = QStringLiteral("D3D11FramePublisher is not initialized.");
+        }
+        return false;
+    }
+    if (artifact.textureId == 0U || !artifact.descriptor.logicalSize.isValid()) {
+        if (error) {
+            *error = QStringLiteral("D3D11FramePublisher only supports texture artifacts.");
+        }
+        return false;
+    }
+
+    int renderSlot = -1;
+    if (!m_slotPool->tryAcquireRenderSlot(&renderSlot)) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+
+    const bool publishOk = publishToSlot(artifact.textureId, artifact.descriptor.logicalSize, renderSlot, error);
+    if (!publishOk) {
+        m_slotPool->abandonRenderSlot(renderSlot);
+        return false;
+    }
+
+    PublishedFrame frame;
+    if (!m_slotPool->submitRenderedFrame(renderSlot, ++m_publicationCounter, &frame)) {
+        m_slotPool->abandonRenderSlot(renderSlot);
+        if (error) {
+            *error = QStringLiteral("Failed to submit the published frame into the shared slot pool.");
+        }
+        return false;
+    }
+
+    if (ticket != nullptr) {
+        ticket->publicationId = m_publicationCounter;
+        ticket->workId = work.workId;
+        ticket->streamKey = work.streamKey;
+        ticket->artifact = artifact.descriptor;
+        ticket->transportMetadata.insert(QStringLiteral("slotIndex"), frame.slotIndex);
+        ticket->transportMetadata.insert(QStringLiteral("generation"), qulonglong(frame.generation));
+        ticket->transportMetadata.insert(QStringLiteral("frameIndex"), qulonglong(frame.frameIndex));
+        ticket->transportMetadata.insert(QStringLiteral("sharedHandle"), qulonglong(frame.sharedHandle));
+        ticket->transportMetadata.insert(QStringLiteral("size"), frame.size);
+    }
+
+    return true;
+}
+
+void D3D11FramePublisher::shutdown()
+{
+    releaseGlResources();
+    m_runtime = nullptr;
+    m_slotPool = nullptr;
+    m_publicationCounter = 0;
+}
+
+void D3D11FramePublisher::setSlotPool(ISharedFrameSlotPool *slotPool)
+{
+    m_slotPool = slotPool;
 }
 
 void D3D11FramePublisher::releaseGlResources()

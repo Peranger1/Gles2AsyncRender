@@ -60,8 +60,8 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     connect(m_displayWidget, &QOpenGLWidgetFrameView::displayReadyForWorker,
             this, &AsyncRenderMainWindow::onDisplayReadyForWorker,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &QOpenGLWidgetFrameView::slotAvailableForWorker,
-            m_worker, &PhotoEditorAsyncRenderFacade::onSlotAvailable,
+    connect(m_displayWidget, &QOpenGLWidgetFrameView::publicationCapacityAvailable,
+            m_worker, &PhotoEditorAsyncRenderFacade::onPublicationCapacityAvailable,
             Qt::QueuedConnection);
     connect(m_displayWidget, &QOpenGLWidgetFrameView::outputSizeChanged,
             m_worker, &PhotoEditorAsyncRenderFacade::setOutputSize,

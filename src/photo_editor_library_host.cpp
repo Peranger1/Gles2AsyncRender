@@ -1,6 +1,7 @@
 #include "photo_editor_library_host.h"
 
 #include "photo_editor_gles2_simulator.h"
+#include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
 #include "framework/backend/win_angle_d3d11/gles2_proc_table.h"
 
 #include <mutex>
@@ -10,10 +11,10 @@ namespace
 std::once_flag g_photoEditorInitOnce;
 bool g_photoEditorInitSucceeded = false;
 QString g_photoEditorInitError;
-IRenderRuntime *g_photoEditorRuntime = nullptr;
+AngleStandaloneRuntime *g_photoEditorRuntime = nullptr;
 } // namespace
 
-bool PhotoEditorLibraryHost::initializeOnce(IRenderRuntime *runtime, QString *error)
+bool PhotoEditorLibraryHost::initializeOnce(AngleStandaloneRuntime *runtime, QString *error)
 {
     if (runtime == nullptr) {
         if (error) {

@@ -1,7 +1,6 @@
 #pragma once
 
-#include "src/framework/core/display_presenter.h"
-
+#include "src/framework/core/gl_presentation_target.h"
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QOpenGLWidget>
@@ -9,7 +8,7 @@
 
 #include <QtMath>
 
-class QOpenGLWidgetDisplayHost final : public IDisplayHost
+class QOpenGLWidgetDisplayHost final : public IGlPresentationTarget
 {
 public:
     explicit QOpenGLWidgetDisplayHost(QOpenGLWidget *widget = nullptr)
@@ -33,7 +32,7 @@ public:
         return context ? context->functions() : nullptr;
     }
 
-    QSize outputPixelSize() const override
+    QSize outputPixelSize() const
     {
         if (!m_widget) {
             return {};
@@ -44,11 +43,21 @@ public:
                      qMax(1, qRound(m_widget->height() * dpr)));
     }
 
-    void requestUpdate() override
+    QSize targetSize() const override
+    {
+        return outputPixelSize();
+    }
+
+    void requestUpdate()
     {
         if (m_widget) {
             m_widget->update();
         }
+    }
+
+    void requestPresent() override
+    {
+        requestUpdate();
     }
 
 private:

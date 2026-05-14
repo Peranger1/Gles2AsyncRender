@@ -2,6 +2,7 @@
 
 #include "photo_editor_render_payload.h"
 #include "photo_editor_gles2_simulator.h"
+#include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
 
 namespace
 {
@@ -11,21 +12,27 @@ QSize sanitizedSize(const QSize &size)
 }
 }
 
-bool PhotoEditorRenderSession::initialize(IRenderRuntime &runtime, QString *error)
+bool PhotoEditorRenderSession::initialize(AngleStandaloneRuntime *runtime, QString *error)
 {
-    m_runtime = &runtime;
-    if (!m_runtime->makeCurrent(error)) {
+    m_runtime = runtime;
+    if (m_runtime == nullptr) {
+        if (error) {
+            *error = QStringLiteral("The photo editor render session runtime is invalid.");
+        }
+        return false;
+    }
+    if (!m_runtime->enter(error)) {
         return false;
     }
 
     const bool ok = m_libraryHost.initializeOnce(m_runtime, error);
-    m_runtime->doneCurrent(nullptr);
+    m_runtime->leave();
     return ok;
 }
 
-bool PhotoEditorRenderSession::submitRequest(const AsyncRenderRequest &request,
+bool PhotoEditorRenderSession::submitRequest(const PhotoEditorRequest &request,
                                              QObject *callbackContext,
-                                             AsyncRenderProgressCallback progressCallback,
+                                             PhotoEditorProgressCallback progressCallback,
                                              void *progressUserData,
                                              QString *error)
 {
@@ -66,7 +73,7 @@ bool PhotoEditorRenderSession::submitRequest(const AsyncRenderRequest &request,
         return false;
     }
 
-    if (!m_runtime->makeCurrent(error)) {
+    if (!m_runtime->enter(error)) {
         return false;
     }
 
@@ -81,7 +88,7 @@ bool PhotoEditorRenderSession::submitRequest(const AsyncRenderRequest &request,
                                   progressUserData,
                                   error);
     }
-    m_runtime->doneCurrent(nullptr);
+    m_runtime->leave();
 
     if (!ok) {
         return false;
@@ -129,7 +136,7 @@ quint64 PhotoEditorRenderSession::requestSequence() const noexcept
     return m_requestSequence;
 }
 
-bool PhotoEditorRenderSession::renderReadyTexture(RenderedTexture *output, QString *error)
+bool PhotoEditorRenderSession::renderReadyTexture(PhotoEditorRenderedTexture *output, QString *error)
 {
     if (output == nullptr) {
         if (error) {
@@ -188,11 +195,11 @@ bool PhotoEditorRenderSession::ensureSessionForPayload(const QString &sourceKey,
         return rebuildSession(sourceImage, outputSize, error);
     }
 
-    if (!m_runtime->makeCurrent(error)) {
+    if (!m_runtime->enter(error)) {
         return false;
     }
     const bool ok = photo_editor_set_output_size(m_session.handle, outputSize, error);
-    m_runtime->doneCurrent(nullptr);
+    m_runtime->leave();
     return ok;
 }
 
@@ -213,7 +220,7 @@ bool PhotoEditorRenderSession::rebuildSession(const QImage &sourceImage,
         }
         return false;
     }
-    if (!m_runtime->makeCurrent(error)) {
+    if (!m_runtime->enter(error)) {
         return false;
     }
 
@@ -222,7 +229,7 @@ bool PhotoEditorRenderSession::rebuildSession(const QImage &sourceImage,
     if (ok) {
         ok = photo_editor_set_output_size(m_session.handle, outputSize, error);
     }
-    m_runtime->doneCurrent(nullptr);
+    m_runtime->leave();
     if (!ok) {
         destroySession();
         return false;
@@ -245,10 +252,10 @@ void PhotoEditorRenderSession::destroySession()
         return;
     }
 
-    const bool madeCurrent = m_runtime && m_runtime->makeCurrent(nullptr);
+    const bool madeCurrent = m_runtime && m_runtime->enter(nullptr);
     photo_editor_destroy(m_session.handle);
     if (madeCurrent) {
-        m_runtime->doneCurrent(nullptr);
+        m_runtime->leave();
     }
     m_session.reset();
 }

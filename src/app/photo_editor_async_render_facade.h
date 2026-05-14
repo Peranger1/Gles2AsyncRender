@@ -1,6 +1,6 @@
 #pragma once
 
-#include "framework/core/async_render_types.h"
+#include "framework/core/work_types.h"
 #include "image_effect_types.h"
 
 #include <QObject>
@@ -8,8 +8,13 @@
 #include <QSize>
 #include <memory>
 
-class AsyncRenderWorker;
+class AngleStandaloneRuntime;
+class D3D11FramePublisher;
+class IAsyncPipeline;
 class ISharedFrameSlotPool;
+class LatestOnlyWorkScheduler;
+class PhotoEditorWorkProcessor;
+struct PublicationTicket;
 
 class PhotoEditorAsyncRenderFacade final : public QObject
 {
@@ -27,7 +32,7 @@ public slots:
     void selectNextImage();
     void selectPreviousImage();
     void requestRender();
-    void onSlotAvailable();
+    void onPublicationCapacityAvailable();
     void shutdown();
 
 signals:
@@ -45,12 +50,19 @@ signals:
 private:
     struct ImageCatalogState;
 
+    void handleProgress(quint64 workId, int progress, bool isFinal);
+    void handleFrameReady(const PublicationTicket &ticket);
+    void handlePipelineError(const QString &reason);
     void emitImageSelection();
     void submitLatestRequest();
-    AsyncRenderRequest buildLatestRequest() const;
+    WorkEnvelope buildLatestWork() const;
 
     std::unique_ptr<ImageCatalogState> m_catalog;
-    AsyncRenderWorker *m_worker = nullptr;
+    std::unique_ptr<AngleStandaloneRuntime> m_runtime;
+    std::unique_ptr<PhotoEditorWorkProcessor> m_processor;
+    std::unique_ptr<D3D11FramePublisher> m_publisher;
+    std::unique_ptr<LatestOnlyWorkScheduler> m_scheduler;
+    std::unique_ptr<IAsyncPipeline> m_pipeline;
     ISharedFrameSlotPool *m_slotPool = nullptr;
     ImageEffectParameters m_effectParameters;
     QSize m_outputSize;

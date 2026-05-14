@@ -70,12 +70,12 @@
 - `src/app/photo_editor_async_render_facade.*`
   - 当前图片编辑 app facade
   - 接收目录加载、切图、参数变化和重绘请求
-  - 把 UI 语义收敛成统一 `AsyncRenderRequest`
+  - 把 UI 语义收敛成统一 `WorkEnvelope`
 
-- `src/framework/core/async_render_worker.*`
-  - 当前通用异步执行 worker
-  - 独占 runtime / session / publisher / executor 的编排
-  - 负责 process、publish、slot wait 和 frame ready 流转
+- `src/framework/core/latest_only_async_pipeline.*`
+  - 当前通用异步执行主链路
+  - 编排 runtime / processor / publisher / scheduler
+  - 负责 `work -> artifact -> publication` 的推进
 
 ## 当前渲染流程
 
@@ -83,10 +83,10 @@
 
 1. `QOpenGLWidgetFrameView` 初始化显示侧 OpenGL ES / ANGLE 上下文
 2. 等显示侧首帧准备完成后，再初始化 `PhotoEditorAsyncRenderFacade`
-3. facade 配置 `AsyncRenderWorker`，worker 创建 runtime、session、publisher 和 slot 交接链路
-4. 用户导入图片目录后，worker 加载首张图片并上传 D3D11 源纹理
-5. worker 获取可用 render slot，并把处理结果写入当前 slot 对应的 shared texture
-6. worker 将新帧提交为 `pending`
+3. facade 初始化 `LatestOnlyAsyncPipeline`，由其创建 runtime、processor、publisher 和 scheduler
+4. 用户导入图片目录后，pipeline 驱动 `PhotoEditorWorkProcessor` 加载首张图片并产生 artifact
+5. publisher 获取可用 render slot，并把处理结果写入当前 slot 对应的 shared texture
+6. publisher 将新帧提交为 `pending`
 7. widget 在自己的显示时机导入 `pending` 对应的 shared texture，并复制到 UI 本地 `display texture`
 8. widget 在同一次 `paintGL()` 内完成 `eglReleaseTexImage + ReleaseSync(0)`，随后立即归还该 slot
 9. 后续显示只采样 UI 本地 `display texture`

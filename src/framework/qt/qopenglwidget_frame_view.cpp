@@ -66,16 +66,18 @@ void QOpenGLWidgetFrameView::initializeGL()
     logImportWidgetMessage(angleInfo.message);
 
     QString error;
-    QString runtimeLog;
-    if (!m_presenter->initialize(&m_displayHost, &error, &runtimeLog)) {
-        logImportWidgetMessage(QStringLiteral("Frame view initialization failed: %1\n%2")
-                                   .arg(error, runtimeLog));
+    if (!m_presenter->initialize(m_displayHost, &error)) {
+        logImportWidgetMessage(QStringLiteral("Frame view initialization failed: %1").arg(error));
         return;
     }
 
-    if (!runtimeLog.isEmpty()) {
-        logImportWidgetMessage(runtimeLog);
+    if (auto *presenter = dynamic_cast<QtAngleDisplayPresenter *>(m_presenter.get())) {
+        const QString runtimeLog = presenter->lastRuntimeLog();
+        if (!runtimeLog.isEmpty()) {
+            logImportWidgetMessage(runtimeLog);
+        }
     }
+
     emit outputSizeChanged(outputPixelSize());
     emit glInitialized();
     m_workerReadyPending = true;
@@ -83,20 +85,21 @@ void QOpenGLWidgetFrameView::initializeGL()
 
 void QOpenGLWidgetFrameView::resizeGL(int, int)
 {
-    m_presenter->onOutputSizeChanged(outputPixelSize());
+    if (auto *presenter = dynamic_cast<QtAngleDisplayPresenter *>(m_presenter.get())) {
+        presenter->onOutputSizeChanged(outputPixelSize());
+    }
     emit outputSizeChanged(outputPixelSize());
 }
 
 void QOpenGLWidgetFrameView::paintGL()
 {
+    PresentationFeedback feedback;
     QString error;
-    bool releasedSlotForWorker = false;
-    if (!m_presenter->paint(&error, &releasedSlotForWorker) && !error.isEmpty()) {
+    if (!m_presenter->present(&feedback, &error) && !error.isEmpty()) {
         logImportWidgetMessage(error);
     }
-    if (releasedSlotForWorker) {
-        m_workerReadyPending = true;
-        emit slotAvailableForWorker();
+    if (feedback.releasedPublicationCapacity) {
+        emit publicationCapacityAvailable();
     }
 }
 
@@ -106,13 +109,18 @@ void QOpenGLWidgetFrameView::onFrameReady(int slotIndex, quint64 generation, QSi
         return;
     }
 
-    PublishedFrame frame;
-    frame.slotIndex = slotIndex;
-    frame.generation = generation;
-    frame.size = size;
-    frame.frameIndex = frameIndex;
-    m_presenter->consume(frame);
-    m_displayHost.requestUpdate();
+    PublicationTicket ticket;
+    ticket.transportMetadata.insert(QStringLiteral("slotIndex"), slotIndex);
+    ticket.transportMetadata.insert(QStringLiteral("generation"), qulonglong(generation));
+    ticket.transportMetadata.insert(QStringLiteral("frameIndex"), qulonglong(frameIndex));
+    ticket.transportMetadata.insert(QStringLiteral("size"), size);
+    ticket.artifact.logicalSize = size;
+
+    QString error;
+    if (!m_presenter->enqueue(ticket, &error) && !error.isEmpty()) {
+        logImportWidgetMessage(error);
+        return;
+    }
 }
 
 void QOpenGLWidgetFrameView::notifyDisplayReadyForWorker()

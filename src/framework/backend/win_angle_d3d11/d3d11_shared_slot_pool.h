@@ -1,6 +1,5 @@
 #pragma once
 
-#include "framework/core/async_render_types.h"
 #include "framework/core/shared_frame_slot_pool.h"
 
 #include <QMutex>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "framework/core/display_presenter.h"
+#include "framework/core/artifact_presenter.h"
 #include "framework/core/shared_frame_slot_pool.h"
 #include "framework/qt/qopenglwidget_display_host.h"
 
@@ -21,7 +21,7 @@ public:
 signals:
     void glInitialized();
     void displayReadyForWorker();
-    void slotAvailableForWorker();
+    void publicationCapacityAvailable();
     void outputSizeChanged(QSize size);
 
 public slots:
@@ -38,7 +38,7 @@ private slots:
 private:
     std::shared_ptr<ISharedFrameSlotPool> m_slotPool;
     QOpenGLWidgetDisplayHost m_displayHost;
-    std::unique_ptr<IFramePresenter> m_presenter;
+    std::unique_ptr<IArtifactPresenter> m_presenter;
     bool m_workerReadyPending = false;
     bool m_shuttingDown = false;
 };

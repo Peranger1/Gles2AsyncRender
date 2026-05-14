@@ -103,7 +103,7 @@
 
 ### 3.3 显示接入层
 
-这一层负责“如何把 pending frame 接到某个具体显示组件上”。
+这一层负责“如何把已发布 artifact 接到某个具体显示组件或 consumer 上”。
 
 这一层应包含：
 
@@ -111,7 +111,7 @@
 - 解析当前 Qt / ANGLE 的 EGL 入口
 - 导入 shared texture
 - 复制到显示组件自己的 local display texture
-- 在显示组件的绘制时机消费最新帧
+- 在显示组件的绘制时机消费最新 artifact
 
 这一层不应包含：
 
@@ -121,20 +121,20 @@
 
 ### 3.4 业务适配层
 
-这一层负责“如何在 worker runtime 上执行某个具体算法，并产出 output texture”。
+这一层负责“如何在 worker runtime 上执行某个具体算法，并产出 artifact”。
 
 这一层应包含：
 
 - 算法库一次性初始化
-- 单个算法 session 生命周期
+- 单个算法 processor 生命周期
 - 输入资源准备
 - 参数应用
 - process / render 调用
-- 输出 `textureId + size`
+- 输出一个或多个 artifact 描述
 
 这一层不应包含：
 
-- shared texture 交接
+- artifact 交付细节
 - import widget 逻辑
 - 显示控件逻辑
 
@@ -146,11 +146,11 @@
 src/
   framework/
     core/
-      async_render_types.h
-      async_render_executor.h/.cpp
-      async_render_session.h
-      frame_publisher.h
-      display_presenter.h
+      work_types.h
+      latest_only_async_pipeline.h/.cpp
+      work_processor.h
+      artifact_publisher.h
+      gl_presentation_target.h
     backend/
       win_angle_d3d11/
         angle_standalone_runtime.h/.cpp
@@ -174,142 +174,391 @@ src/
 
 第一阶段不要求一次性把所有文件移动到上述目录，但新增代码应优先按这个结构放置。
 
-## 5. 框架核心对象
+## 5. 通用接口草案
 
-### 5.1 渲染请求与结果
-
-建议新增统一类型：
+### 5.1 核心数据类型
 
 ```cpp
-struct AsyncRenderRequest
+enum class WorkPriority
 {
-    quint64 sequence = 0;
-    QSize outputSize;
+    Low,
+    Normal,
+    High
+};
+
+enum class CoalescingPolicy
+{
+    KeepAll,
+    ReplaceByKey,
+    DropIfBusy,
+    LatestOnly
+};
+
+enum class WorkState
+{
+    Queued,
+    Admitted,
+    Executing,
+    ProducingArtifact,
+    Publishing,
+    Published,
+    Cancelled,
+    Failed
+};
+
+struct WorkEnvelope
+{
+    quint64 workId = 0;
+    QString streamKey;
+    QString workflowKey;
+    WorkPriority priority = WorkPriority::Normal;
+    CoalescingPolicy coalescing = CoalescingPolicy::ReplaceByKey;
+    QVariantMap hints;
     std::shared_ptr<void> payload;
 };
 
-struct RenderedTexture
+struct ArtifactDescriptor
 {
-    GLuint textureId = 0;
-    QSize size;
+    quint64 artifactId = 0;
+    QString artifactKey;
+    QString kind;
+    QSize logicalSize;
+    QVariantMap metadata;
 };
 
-struct PublishedFrame
+struct PublicationTicket
 {
-    int slotIndex = -1;
-    quintptr sharedHandle = 0;
-    QSize size;
-    quint64 generation = 0;
-    quint64 frameIndex = 0;
+    quint64 publicationId = 0;
+    quint64 workId = 0;
+    QString streamKey;
+    ArtifactDescriptor artifact;
+    QVariantMap transportMetadata;
 };
 ```
 
 说明：
 
-- `AsyncRenderRequest` 是异步执行层唯一认识的输入
+- `WorkEnvelope` 是异步执行层唯一认识的输入
 - `payload` 由业务层自解释，框架不解析
-- `RenderedTexture` 是业务 session 产出的 worker-side 结果
-- `PublishedFrame` 是平台互操作层产出的跨线程交接结果
+- `ArtifactDescriptor` 描述产物的类型、尺寸和元数据
+- `PublicationTicket` 描述一次已发布产物的交付结果
 
-### 5.2 运行时接口
-
-建议把 runtime 契约显式抽象出来：
+### 5.2 运行时与执行接口
 
 ```cpp
-class IRenderRuntime
+class IWorkRuntime
 {
 public:
-    virtual ~IRenderRuntime() = default;
+    virtual ~IWorkRuntime() = default;
 
     virtual bool initialize(QString *error) = 0;
-    virtual bool makeCurrent(QString *error) = 0;
-    virtual bool doneCurrent(QString *error) = 0;
+    virtual bool enter(QString *error) = 0;
+    virtual void leave() = 0;
     virtual void shutdown() = 0;
 
     virtual void *resolveProc(const char *name) const = 0;
-    virtual const Gles2ProcTable &procTable() const = 0;
 };
-```
 
-Windows 首个实现就是把现有 `AngleStandaloneRuntime` 整理为 `IRenderRuntime` 的实现。
-
-### 5.3 业务 session 接口
-
-建议把具体算法适配为统一接口：
-
-```cpp
-class IAsyncRenderSession
+class IWorkObserver
 {
 public:
-    virtual ~IAsyncRenderSession() = default;
+    virtual ~IWorkObserver() = default;
 
-    virtual bool initialize(IRenderRuntime &runtime, QString *error) = 0;
-    virtual bool render(const AsyncRenderRequest &request,
-                        RenderedTexture *output,
-                        QString *error) = 0;
+    virtual void onStateChanged(quint64 workId, WorkState state) = 0;
+    virtual void onProgress(quint64 workId, int progress, bool isFinal) = 0;
+    virtual void onMessage(quint64 workId, const QString &message) = 0;
+};
+
+class IArtifactBuilder
+{
+public:
+    virtual ~IArtifactBuilder() = default;
+
+    virtual bool setTexture(GLuint textureId,
+                            const QSize &size,
+                            const QVariantMap &metadata,
+                            QString *error) = 0;
+    virtual bool setSharedHandle(quintptr handle,
+                                 const QSize &size,
+                                 const QVariantMap &metadata,
+                                 QString *error) = 0;
+    virtual bool setCpuBitmap(const QImage &image,
+                              const QVariantMap &metadata,
+                              QString *error) = 0;
+    virtual bool setCustom(std::shared_ptr<void> object,
+                           const ArtifactDescriptor &descriptor,
+                           QString *error) = 0;
+};
+
+class IWorkProcessor
+{
+public:
+    virtual ~IWorkProcessor() = default;
+
+    virtual bool initialize(IWorkRuntime &runtime, QString *error) = 0;
+    virtual void setWakeCallback(ProcessorWakeCallback callback) = 0;
+    virtual bool start(const WorkEnvelope &work,
+                       IWorkObserver *observer,
+                       QString *error) = 0;
+    virtual bool isArtifactReady() const = 0;
+    virtual bool collectIfReady(IArtifactBuilder &builder,
+                                QString *error) = 0;
+    virtual void cancel(quint64 workId) = 0;
     virtual void shutdown() = 0;
 };
 ```
 
 约束如下：
 
-- `render()` 调用期间由执行层保证 runtime 已经 current
-- session 只负责从 request 产出 `RenderedTexture`
-- session 不分配 shared slot
-- session 不直接发 UI 信号
+- `start()` 只负责启动一次异步处理，不在接口内部阻塞等待结果
+- `collectIfReady()` 期间由执行层保证 runtime 已经进入可用状态
+- processor 只负责把 `WorkEnvelope` 转成一种或多种 artifact
+- processor 不分配 slot，不直接触碰显示逻辑
+- processor 通过 `wakeCallback` 主动通知 pipeline “状态已推进，可以再泵一轮”
+- observer 只是事件通道，不承担业务状态解释
 
-### 5.4 发布接口
-
-建议把 shared texture publish 收敛为统一契约：
+### 5.3 调度与发布接口
 
 ```cpp
-class IFramePublisher
+class IWorkScheduler
 {
 public:
-    virtual ~IFramePublisher() = default;
+    virtual ~IWorkScheduler() = default;
 
-    virtual bool initialize(IRenderRuntime &runtime, QString *error) = 0;
-    virtual bool publish(const RenderedTexture &source,
-                         PublishedFrame *frame,
+    virtual void submit(const WorkEnvelope &work) = 0;
+    virtual bool takeNext(WorkEnvelope *work) = 0;
+    virtual bool hasPending() const = 0;
+    virtual void cancel(quint64 workId) = 0;
+    virtual void clear() = 0;
+};
+
+class IArtifactPublisher
+{
+public:
+    virtual ~IArtifactPublisher() = default;
+
+    virtual bool initialize(IWorkRuntime &runtime, QString *error) = 0;
+    virtual bool publish(const WorkEnvelope &work,
+                         const ArtifactDescriptor &artifact,
+                         PublicationTicket *ticket,
                          QString *error) = 0;
-    virtual void shutdown() = 0;
-};
-```
-
-Windows 首个实现应直接由当前 `D3D11FramePublisher` 演化而来。
-
-### 5.5 显示接入接口
-
-建议把显示接入侧拆成两层：
-
-```cpp
-class IDisplayHost
-{
-public:
-    virtual ~IDisplayHost() = default;
-
-    virtual QOpenGLContext *glContext() const = 0;
-    virtual QSize outputPixelSize() const = 0;
-    virtual void requestUpdate() = 0;
-};
-
-class IFramePresenter
-{
-public:
-    virtual ~IFramePresenter() = default;
-
-    virtual bool initialize(IDisplayHost &host, QString *error) = 0;
-    virtual bool consume(const PublishedFrame &frame, QString *error) = 0;
-    virtual void paint() = 0;
     virtual void shutdown() = 0;
 };
 ```
 
 说明：
 
-- `IDisplayHost` 代表具体显示组件壳
-- `IFramePresenter` 代表互操作和显示逻辑
-- `QOpenGLWidget` 只是一个 `IDisplayHost` 实现
+- `IWorkScheduler` 负责请求收敛和出队策略
+- `IArtifactPublisher` 负责把通用 artifact 交给具体平台的交付通道
+- `slot pool` 只应作为某些 publisher 的内部实现细节，不应上浮为 core 必选概念
+
+### 5.4 展示接入接口
+
+```cpp
+class IPresentationTarget
+{
+public:
+    virtual ~IPresentationTarget() = default;
+
+    virtual QSize targetSize() const = 0;
+    virtual void requestPresent() = 0;
+};
+
+struct PresentationFeedback
+{
+    bool releasedPublicationCapacity = false;
+};
+
+class IGlPresentationTarget : public IPresentationTarget
+{
+public:
+    virtual ~IGlPresentationTarget() = default;
+
+    virtual QOpenGLContext *glContext() const = 0;
+    virtual QOpenGLFunctions *glFunctions() const = 0;
+};
+
+class IArtifactPresenter
+{
+public:
+    virtual ~IArtifactPresenter() = default;
+
+    virtual bool initialize(IPresentationTarget &target, QString *error) = 0;
+    virtual bool enqueue(const PublicationTicket &ticket, QString *error) = 0;
+    virtual bool present(PresentationFeedback *feedback, QString *error) = 0;
+    virtual void shutdown() = 0;
+};
+```
+
+说明：
+
+- `IPresentationTarget` 代表具体显示宿主壳
+- `IGlPresentationTarget` 代表“除展示宿主壳外，还能暴露当前可用 GL context / functions 的目标”
+- `IArtifactPresenter` 代表消费已发布产物并完成展示的逻辑
+- `QOpenGLWidget` 只是一个 `IPresentationTarget` 实现
+
+### 5.5 执行管线接口
+
+```cpp
+class IAsyncPipeline
+{
+public:
+    virtual ~IAsyncPipeline() = default;
+
+    virtual bool initialize(IWorkRuntime *runtime,
+                             IWorkProcessor *processor,
+                             IArtifactPublisher *publisher,
+                             IWorkScheduler *scheduler,
+                             QString *error) = 0;
+
+    virtual void submit(const WorkEnvelope &work) = 0;
+    virtual void pump() = 0;
+    virtual void onPublicationCapacityAvailable() = 0;
+    virtual void setProgressCallback(std::function<void(quint64, int, bool)> callback) = 0;
+    virtual void setFrameReadyCallback(std::function<void(const PublicationTicket &)> callback) = 0;
+    virtual void setErrorCallback(std::function<void(const QString &)> callback) = 0;
+    virtual void shutdown() = 0;
+};
+```
+
+说明：
+
+- `IAsyncPipeline` 只负责把 scheduler、processor、publisher 串起来
+- 它不理解业务 payload，也不理解具体 artifact 的展示方式
+- `pump()` 用于主动驱动一轮处理/发布尝试
+- callback 只暴露通用事件，不暴露具体业务结构
+- 对应当前实现中的 executor/worker 组合，未来可演化为独立调度器或服务对象
+
+### 5.6 类图
+
+```mermaid
+classDiagram
+    class WorkEnvelope {
+        +quint64 workId
+        +QString streamKey
+        +QString workflowKey
+        +WorkPriority priority
+        +CoalescingPolicy coalescing
+        +QVariantMap hints
+        +shared_ptr payload
+    }
+
+    class ArtifactDescriptor {
+        +quint64 artifactId
+        +QString artifactKey
+        +QString kind
+        +QSize logicalSize
+        +QVariantMap metadata
+    }
+
+    class PublicationTicket {
+        +quint64 publicationId
+        +quint64 workId
+        +QString streamKey
+        +ArtifactDescriptor artifact
+        +QVariantMap transportMetadata
+    }
+
+    class IWorkRuntime {
+        <<interface>>
+        +initialize(error) bool
+        +enter(error) bool
+        +leave() void
+        +shutdown() void
+        +resolveProc(name) void*
+    }
+
+    class IWorkProcessor {
+        <<interface>>
+        +initialize(runtime, error) bool
+        +setWakeCallback(callback) void
+        +start(work, observer, error) bool
+        +isArtifactReady() bool
+        +collectIfReady(builder, error) bool
+        +cancel(workId) void
+        +shutdown() void
+    }
+
+    class IArtifactBuilder {
+        <<interface>>
+        +setTexture(textureId, size, metadata, error) bool
+        +setSharedHandle(handle, size, metadata, error) bool
+        +setCpuBitmap(image, metadata, error) bool
+        +setCustom(object, descriptor, error) bool
+    }
+
+    class IWorkScheduler {
+        <<interface>>
+        +submit(work) void
+        +takeNext(work) bool
+        +hasPending() bool
+        +cancel(workId) void
+        +clear() void
+    }
+
+    class IArtifactPublisher {
+        <<interface>>
+        +initialize(runtime, error) bool
+        +publish(work, artifact, ticket, error) bool
+        +shutdown() void
+    }
+
+    class IPresentationTarget {
+        <<interface>>
+        +targetSize() QSize
+        +requestPresent() void
+    }
+
+    class PresentationFeedback {
+        +bool releasedPublicationCapacity
+    }
+
+    class IGlPresentationTarget {
+        <<interface>>
+        +glContext() QOpenGLContext*
+        +glFunctions() QOpenGLFunctions*
+    }
+
+    class IArtifactPresenter {
+        <<interface>>
+        +initialize(target, error) bool
+        +enqueue(ticket, error) bool
+        +present(feedback, error) bool
+        +shutdown() void
+    }
+
+    class IAsyncPipeline {
+        <<interface>>
+        +initialize(runtime, processor, publisher, scheduler, error) bool
+        +submit(work) void
+        +pump() void
+        +onPublicationCapacityAvailable() void
+        +shutdown() void
+    }
+
+    IAsyncPipeline --> IWorkRuntime
+    IAsyncPipeline --> IWorkProcessor
+    IAsyncPipeline --> IArtifactPublisher
+    IAsyncPipeline --> IWorkScheduler
+    IWorkProcessor ..> WorkEnvelope
+    IWorkProcessor ..> IArtifactBuilder
+    IArtifactPublisher ..> WorkEnvelope
+    IArtifactPublisher ..> ArtifactDescriptor
+    IGlPresentationTarget --|> IPresentationTarget
+    IArtifactPresenter ..> PublicationTicket
+    IArtifactPresenter ..> PresentationFeedback
+    PublicationTicket *-- ArtifactDescriptor
+```
+
+### 5.7 适配关系
+
+建议把当前实现中的对象映射为：
+
+- `AngleStandaloneRuntime` -> `IWorkRuntime`
+- `LatestOnlyAsyncPipeline` -> `IAsyncPipeline`
+- `D3D11FramePublisher` -> `IArtifactPublisher`
+- `QOpenGLWidgetFrameView` / `QtAngleDisplayPresenter` -> `IArtifactPresenter`
+- `D3D11SharedSlotPool` -> `IArtifactPublisher` 的 backend 内部资源池实现
 
 ## 6. 异步执行模型
 
@@ -347,7 +596,7 @@ enum class ExecutorState
 2. 如果新请求到达而旧请求尚未开始执行，旧请求直接被覆盖。
 3. 如果新请求到达时当前处于 `Processing`，只记录最新请求，当前轮完成后再执行下一轮。
 4. 如果算法已经完成但没有 free slot，则进入 `WaitingForSlot`。
-5. UI 在 slot 释放后只唤醒执行层，不重新解释业务状态。
+5. UI 只在实际释放 publication capacity 后唤醒执行层，不重新解释业务状态。
 6. `shutdown()` 必须让执行层停止再进入新一轮 request。
 
 ### 6.4 为什么这里不做多队列
@@ -481,7 +730,7 @@ enum class ExecutorState
 - 参数快照应用
 - `photo_editor_process`
 - `photo_editor_render`
-- 输出 `RenderedTexture`
+- 输出可被 `IArtifactBuilder` 收集的 texture artifact
 
 执行器不再直接持有：
 
@@ -490,11 +739,11 @@ enum class ExecutorState
 - `QImage`
 - 业务参数结构
 
-这些都应先收敛到业务层 request 中。
+这些都应先收敛到业务层 work 中。
 
 ### 9.3 第一阶段不必过度泛化
 
-即便在引入 `IAsyncRenderSession` 后，也不要求马上做到：
+即便在引入 `IWorkProcessor` 后，也不要求马上做到：
 
 - 任意 payload 自动反序列化
 - 任意算法库插件动态装载
@@ -503,7 +752,7 @@ enum class ExecutorState
 第一阶段只要做到：
 
 - worker 不再知道 Photo Editor 业务细节
-- Photo Editor 通过自己的 session adapter 接入框架
+- Photo Editor 通过自己的 processor adapter 接入框架
 
 就已经足够。
 
@@ -518,9 +767,9 @@ enum class ExecutorState
 
 步骤：
 
-1. 新增 `framework/core/async_render_types.h`
-2. 新增 `IRenderRuntime`、`IAsyncRenderSession`、`IFramePublisher`、`IDisplayHost`、`IFramePresenter`
-3. 让现有 `AngleStandaloneRuntime`、`D3D11FramePublisher` 在不改行为的前提下适配这些接口
+1. 新增 `framework/core/work_types.h`
+2. 新增 `IWorkRuntime`、`IWorkProcessor`、`IArtifactPublisher`、`IPresentationTarget`、`IArtifactPresenter`
+3. 让现有 `AngleStandaloneRuntime`、`D3D11FramePublisher` 直接收敛到这些接口
 
 阶段完成标准：
 
@@ -531,19 +780,27 @@ enum class ExecutorState
 
 目标：
 
-- 把业务 session 从执行器里剥离出来
+- 把业务 processor 从执行器里剥离出来
 
 步骤：
 
-1. 新增 `AsyncRenderExecutor`
-2. 把 `D3D11NativeWorker` 中的调度逻辑迁到 `AsyncRenderExecutor`
-3. 新增 `PhotoEditorRenderSession`
-4. 把当前 `D3D11NativeWorker` 中的图片编辑流程迁到 `PhotoEditorRenderSession`
+1. 新增 `IAsyncPipeline`
+2. 把当前调度逻辑迁到 scheduler / pipeline
+3. 新增 `PhotoEditorWorkProcessor`
+4. 把当前图片编辑流程迁到 `PhotoEditorWorkProcessor`
 
 阶段完成标准：
 
 - 执行器不再知道图片目录、图片索引、业务参数结构
-- session 自己产出 `RenderedTexture`
+- processor 自己产出 artifact
+
+当前落地状态：
+
+- 已新增 `PhotoEditorWorkProcessor`
+- 已新增 `LatestOnlyAsyncPipeline` 与 `LatestOnlyWorkScheduler`
+- `PhotoEditorAsyncRenderFacade` 已改为通过 `WorkEnvelope -> IAsyncPipeline -> IArtifactPublisher` 主链路工作
+- `D3D11FramePublisher` 已收敛为纯 `IArtifactPublisher` 实现
+- 旧 `AsyncRenderWorker` / `AsyncRenderExecutor` / `IFramePublisher` / `IRenderRuntime` / `IAsyncRenderSession` 已从主仓库删除
 
 ### 阶段三：拆 presenter
 
@@ -554,14 +811,30 @@ enum class ExecutorState
 步骤：
 
 1. 新增 `QOpenGLWidgetDisplayHost`
-2. 新增 `QtAngleFramePresenter`
-3. 把 `copyFrameToDisplayTexture()`、imported slot 管理、display texture 绘制迁入 presenter
+2. 新增 `QtAngleArtifactPresenter`
+3. 把 import / copy / display 绘制迁入 presenter
 4. `QOpenGLWidgetFrameView` 只保留 widget 壳和信号转发
 
 阶段完成标准：
 
 - presenter 可以脱离当前 widget 文件独立存在
 - widget 文件中不再直接出现大段 interop 细节
+
+当前落地状态：
+
+- `QOpenGLWidgetDisplayHost` 已收敛为 `IGlPresentationTarget` 的实现
+- `QtAngleDisplayPresenter` 已收敛为纯 `IArtifactPresenter` 实现，不再依赖旧显示接口
+- `QOpenGLWidgetFrameView` 已改为通过 `IArtifactPresenter` 进行 `enqueue/present`
+- presenter 在 `present()` 时通过 `PresentationFeedback` 显式反馈“是否释放了 publication capacity”
+- UI 到 pipeline 的回压通知已从 `slotAvailableForWorker` / `onPublishTargetAvailable()` 收敛为 `publicationCapacityAvailable` / `onPublicationCapacityAvailable()`
+- 现有显示实现保留 shared slot import 与 copy/draw 逻辑，作为当前 backend 下的标准展示实现
+
+### 阶段三补充约束：runtime scope
+
+- `IWorkRuntime::enter()/leave()` 是 runtime-bound GPU 操作的统一边界。
+- pipeline 负责建立 publisher 初始化、publish、shutdown 所需的 runtime scope。
+- 业务 processor 可以在自身内部管理 runtime scope，但不能假设其他组件仍处于 current 状态。
+- 这条约束已经由本仓库现行主路径实现，不再通过旧兼容层兜底。
 
 ### 阶段四：清理命名与目录
 
@@ -614,9 +887,9 @@ slot pool 是框架 backend 层的资源复用协议，不应继续向上层泄�
 
 业务层只应该看到：
 
-- request
-- output texture
-- published frame ready
+- work
+- artifact
+- publication ready
 
 ### 11.4 不要让 presenter 直接调用业务接口
 
@@ -632,14 +905,14 @@ presenter 只负责消费 frame，不应反向控制：
 
 完成上述重构后，这个工程应收敛为下面的稳定结构：
 
-- backend 层负责独立 runtime、EGL/GLES2 入口、shared texture、slot pool、publish/import
-- executor 层负责异步执行模型和请求收敛
-- presenter 层负责把 pending frame 呈现到具体显示组件
-- adapter 层负责把具体算法库包装成统一 session
-- app 层只负责把 UI 事件转成 request，把 frame ready 接到 presenter
+- backend 层负责独立 runtime、EGL/GLES2 入口、artifact 交付通道、资源复用实现
+- execution 层负责异步执行模型和请求收敛
+- presenter 层负责把已发布 artifact 呈现到具体显示组件或其他 consumer
+- adapter 层负责把具体算法库包装成统一 processor
+- app 层只负责把 UI 事件转成 work，把已发布结果接到 presenter
 
 用一句话概括，最终框架应稳定在：
 
-`session 产出 worker-side texture，publisher 负责跨 runtime 交接，presenter 负责显示，executor 负责把这一切串起来。`
+`processor 产出 artifact，publisher 负责跨 runtime 交付，presenter 负责消费，pipeline 负责把这一切串起来。`
 
 这就是当前工程继续演进时最稳妥、也最符合现有代码事实的收敛方向。

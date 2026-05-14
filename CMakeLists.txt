@@ -13,6 +13,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 
 add_executable(Gles2AsyncRender
+    src/adapters/photo_editor/photo_editor_work_processor.cpp
+    src/adapters/photo_editor/photo_editor_work_processor.h
     src/adapters/photo_editor/photo_editor_render_payload.h
     src/adapters/photo_editor/photo_editor_render_session.cpp
     src/adapters/photo_editor/photo_editor_render_session.h
@@ -33,16 +35,25 @@ add_executable(Gles2AsyncRender
     src/framework/backend/win_angle_d3d11/gles2_shader_utils.h
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h
-    src/framework/core/async_render_executor.cpp
-    src/framework/core/async_render_executor.h
-    src/framework/core/async_render_session.h
-    src/framework/core/async_render_types.h
-    src/framework/core/async_render_worker.cpp
-    src/framework/core/async_render_worker.h
-    src/framework/core/display_presenter.h
-    src/framework/core/frame_publisher.h
-    src/framework/core/render_runtime.h
+    src/framework/core/async_pipeline.cpp
+    src/framework/core/async_pipeline.h
+    src/framework/core/artifact_builder.h
+    src/framework/core/artifact_presenter.h
+    src/framework/core/artifact_publisher.h
+    src/framework/core/gl_presentation_target.h
+    src/framework/core/latest_only_async_pipeline.cpp
+    src/framework/core/latest_only_async_pipeline.h
+    src/framework/core/latest_only_work_scheduler.cpp
+    src/framework/core/latest_only_work_scheduler.h
+    src/framework/core/presentation_target.h
     src/framework/core/shared_frame_slot_pool.h
+    src/framework/core/simple_artifact_builder.cpp
+    src/framework/core/simple_artifact_builder.h
+    src/framework/core/work_observer.h
+    src/framework/core/work_processor.h
+    src/framework/core/work_runtime.h
+    src/framework/core/work_scheduler.h
+    src/framework/core/work_types.h
     src/framework/qt/qopenglwidget_frame_view.cpp
     src/framework/qt/qopenglwidget_frame_view.h
     src/framework/qt/qt_angle_display_presenter.cpp

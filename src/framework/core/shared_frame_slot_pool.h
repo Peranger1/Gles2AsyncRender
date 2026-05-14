@@ -1,6 +1,6 @@
 #pragma once
 
-#include "async_render_types.h"
+#include "work_types.h"
 
 class ISharedFrameSlotPool
 {
