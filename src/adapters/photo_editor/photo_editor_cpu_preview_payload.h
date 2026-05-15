@@ -6,11 +6,11 @@
 #include <QImage>
 #include <QString>
 
-struct PhotoEditorRenderPayload final : public IWorkPayload
+struct PhotoEditorCpuPreviewPayload final : public IWorkPayload
 {
     QString sourceKey;
     quint64 sourceImageCacheKey = 0;
     QImage sourceImage;
     ImageEffectParameters parameters;
-    QSize outputSize;
+    QSize previewSize;
 };

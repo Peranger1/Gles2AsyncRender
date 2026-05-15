@@ -1,7 +1,6 @@
 #include "qopenglwidget_frame_view.h"
 
 #include "angle_threading.h"
-#include "framework/qt/qt_angle_display_presenter.h"
 #include "runtime_diagnostics.h"
 
 namespace
@@ -19,8 +18,6 @@ void logImportWidgetDiag(const QString &message)
 
 QOpenGLWidgetFrameView::QOpenGLWidgetFrameView(QWidget *parent)
     : QOpenGLWidget(parent)
-    , m_displayHost(this)
-    , m_presenter(std::make_unique<QtAngleDisplayPresenter>())
 {
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     connect(this, &QOpenGLWidget::frameSwapped, this, &QOpenGLWidgetFrameView::notifyDisplayReadyForWorker, Qt::QueuedConnection);
@@ -31,7 +28,7 @@ QOpenGLWidgetFrameView::~QOpenGLWidgetFrameView()
     m_shuttingDown = true;
     disconnect(this, &QOpenGLWidget::frameSwapped, this, &QOpenGLWidgetFrameView::notifyDisplayReadyForWorker);
     logImportWidgetDiag(QStringLiteral("Destructor begin"));
-    if (context()) {
+    if (context() && m_presenter) {
         makeCurrent();
         m_presenter->shutdown();
         doneCurrent();
@@ -39,17 +36,42 @@ QOpenGLWidgetFrameView::~QOpenGLWidgetFrameView()
     logImportWidgetDiag(QStringLiteral("Destructor end"));
 }
 
-void QOpenGLWidgetFrameView::setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool)
+void QOpenGLWidgetFrameView::setFrameReader(const std::shared_ptr<IFrameReader> &frameReader)
 {
-    m_slotPool = slotPool;
-    if (auto *presenter = dynamic_cast<QtAngleDisplayPresenter *>(m_presenter.get())) {
-        presenter->setSlotPool(slotPool);
-    }
+    m_frameReader = frameReader;
+}
+
+void QOpenGLWidgetFrameView::setPresenter(std::unique_ptr<IFramePresenter> presenter)
+{
+    m_presenter = std::move(presenter);
 }
 
 QSize QOpenGLWidgetFrameView::outputPixelSize() const
 {
-    return m_displayHost.outputPixelSize();
+    const qreal dpr = devicePixelRatioF();
+    return QSize(qMax(1, qRound(width() * dpr)),
+                 qMax(1, qRound(height() * dpr)));
+}
+
+QSize QOpenGLWidgetFrameView::targetSize() const
+{
+    return outputPixelSize();
+}
+
+void QOpenGLWidgetFrameView::requestPresent()
+{
+    update();
+}
+
+QOpenGLContext *QOpenGLWidgetFrameView::glContext() const
+{
+    return context();
+}
+
+QOpenGLFunctions *QOpenGLWidgetFrameView::glFunctions() const
+{
+    QOpenGLContext *gl = context();
+    return gl ? gl->functions() : nullptr;
 }
 
 void QOpenGLWidgetFrameView::initializeGL()
@@ -65,17 +87,24 @@ void QOpenGLWidgetFrameView::initializeGL()
     const AngleThreadingInfo angleInfo = ensureAngleD3D11MultithreadProtection();
     logImportWidgetMessage(angleInfo.message);
 
+    if (!m_frameReader) {
+        logImportWidgetMessage(QStringLiteral("Frame view initialization failed: frame reader is not configured."));
+        return;
+    }
+    if (!m_presenter) {
+        logImportWidgetMessage(QStringLiteral("Frame view initialization failed: presenter is not configured."));
+        return;
+    }
+
     QString error;
-    if (!m_presenter->initialize(m_displayHost, &error)) {
+    if (!m_presenter->initialize(*this, *m_frameReader, &error)) {
         logImportWidgetMessage(QStringLiteral("Frame view initialization failed: %1").arg(error));
         return;
     }
 
-    if (auto *presenter = dynamic_cast<QtAngleDisplayPresenter *>(m_presenter.get())) {
-        const QString runtimeLog = presenter->lastRuntimeLog();
-        if (!runtimeLog.isEmpty()) {
-            logImportWidgetMessage(runtimeLog);
-        }
+    const QString runtimeLog = m_presenter->diagnosticText();
+    if (!runtimeLog.isEmpty()) {
+        logImportWidgetMessage(runtimeLog);
     }
 
     emit outputSizeChanged(outputPixelSize());
@@ -85,15 +114,12 @@ void QOpenGLWidgetFrameView::initializeGL()
 
 void QOpenGLWidgetFrameView::resizeGL(int, int)
 {
-    if (auto *presenter = dynamic_cast<QtAngleDisplayPresenter *>(m_presenter.get())) {
-        presenter->onOutputSizeChanged(outputPixelSize());
-    }
     emit outputSizeChanged(outputPixelSize());
 }
 
 void QOpenGLWidgetFrameView::paintGL()
 {
-    PresentationFeedback feedback;
+    FramePresentationFeedback feedback;
     QString error;
     if (!m_presenter->present(&feedback, &error) && !error.isEmpty()) {
         logImportWidgetMessage(error);
@@ -103,18 +129,14 @@ void QOpenGLWidgetFrameView::paintGL()
     }
 }
 
-void QOpenGLWidgetFrameView::onFrameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex)
+void QOpenGLWidgetFrameView::onFrameReady(const FrameTicket &ticket)
 {
     if (m_shuttingDown) {
         return;
     }
-
-    PublicationTicket ticket;
-    ticket.transportMetadata.insert(QStringLiteral("slotIndex"), slotIndex);
-    ticket.transportMetadata.insert(QStringLiteral("generation"), qulonglong(generation));
-    ticket.transportMetadata.insert(QStringLiteral("frameIndex"), qulonglong(frameIndex));
-    ticket.transportMetadata.insert(QStringLiteral("size"), size);
-    ticket.artifact.logicalSize = size;
+    if (!m_presenter) {
+        return;
+    }
 
     QString error;
     if (!m_presenter->enqueue(ticket, &error) && !error.isEmpty()) {

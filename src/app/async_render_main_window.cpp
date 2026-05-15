@@ -1,9 +1,9 @@
 #include "async_render_main_window.h"
 
 #include "app/photo_editor_async_render_facade.h"
+#include "framework/backend/platform_render_backend.h"
+#include "framework/backend/render_backend_factory.h"
 #include "framework/qt/qopenglwidget_frame_view.h"
-#include "framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h"
-#include "framework/core/shared_frame_slot_pool.h"
 #include "runtime_diagnostics.h"
 
 #include <QAction>
@@ -16,6 +16,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -24,6 +25,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QtMath>
+
+#include <variant>
 
 namespace
 {
@@ -41,13 +44,16 @@ void logWindowDiag(const QString &message)
 AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_displayWidget(new QOpenGLWidgetFrameView(this))
-    , m_slotPool(std::make_shared<D3D11SharedSlotPool>(3))
+    , m_renderBackend(createDefaultRenderBackend())
     , m_worker(new PhotoEditorAsyncRenderFacade())
 {
     setWindowTitle(QStringLiteral("Gles2AsyncRender"));
     resize(1280, 760);
 
-    m_displayWidget->setSlotPool(m_slotPool);
+    if (m_renderBackend) {
+        m_displayWidget->setFrameReader(m_renderBackend->sharedFrameReader());
+        m_displayWidget->setPresenter(m_renderBackend->createPresenter());
+    }
     setCentralWidget(m_displayWidget);
 
     m_workerThread.setObjectName(QStringLiteral("PhotoEditorAsyncRenderFacadeThread"));
@@ -79,6 +85,18 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     connect(m_worker, &PhotoEditorAsyncRenderFacade::imageSelectionChanged,
             this, &AsyncRenderMainWindow::onImageSelectionChanged,
             Qt::QueuedConnection);
+    connect(m_worker, &PhotoEditorAsyncRenderFacade::jobResultReady,
+            this, [this](const JobResult &result) {
+                if (!std::holds_alternative<FrameTicket>(result.payload)) {
+                    logWindowMessage(QStringLiteral("Received non-frame job result. kind=%1 requestId=%2")
+                                         .arg(result.resultKind)
+                                         .arg(result.requestId));
+                }
+            },
+            Qt::QueuedConnection);
+    connect(m_worker, &PhotoEditorAsyncRenderFacade::cpuPreviewReady,
+            this, &AsyncRenderMainWindow::showCpuPreviewDialog,
+            Qt::QueuedConnection);
 
     m_workerThread.start();
 
@@ -107,12 +125,12 @@ AsyncRenderMainWindow::~AsyncRenderMainWindow()
 
 void AsyncRenderMainWindow::onDisplayGlInitialized()
 {
-    logWindowMessage(QStringLiteral("Display import widget is ready. Waiting for the first frame swap before starting the D3D11 worker."));
+    logWindowMessage(QStringLiteral("Display widget is ready. Waiting for the first frame swap before starting the render worker."));
 }
 
 void AsyncRenderMainWindow::onDisplayReadyForWorker()
 {
-    if (m_workerInitialized || m_workerInitAttempted || m_worker == nullptr) {
+    if (m_workerInitialized || m_workerInitAttempted || m_worker == nullptr || m_renderBackend == nullptr) {
         return;
     }
 
@@ -124,11 +142,11 @@ void AsyncRenderMainWindow::onDisplayReadyForWorker()
         "initialize",
         Qt::BlockingQueuedConnection,
         Q_RETURN_ARG(bool, initialized),
-        Q_ARG(ISharedFrameSlotPool *, m_slotPool.get()),
+        Q_ARG(IPlatformRenderBackend *, m_renderBackend.get()),
         Q_ARG(QSize, m_displayWidget->outputPixelSize()));
     initialized = invoked && initialized;
     if (!initialized) {
-        logWindowMessage(QStringLiteral("D3D11 native worker initialization failed."));
+        logWindowMessage(QStringLiteral("Render worker initialization failed."));
         return;
     }
 
@@ -136,14 +154,14 @@ void AsyncRenderMainWindow::onDisplayReadyForWorker()
     pushEffectParameters();
     requestRender();
     updateImageActions();
-    logWindowMessage(QStringLiteral("D3D11 native worker is ready. Import an image directory to start the demo."));
+    logWindowMessage(QStringLiteral("Render worker is ready. Import an image directory to start rendering."));
     updateStatusBarMessage();
 }
 
 void AsyncRenderMainWindow::openImageDirectory()
 {
     if (!m_workerInitialized) {
-        QMessageBox::warning(this, QStringLiteral("Worker Not Ready"), QStringLiteral("The D3D11 native worker is not initialized yet."));
+        QMessageBox::warning(this, QStringLiteral("Worker Not Ready"), QStringLiteral("The render worker is not initialized yet."));
         return;
     }
 
@@ -161,7 +179,7 @@ void AsyncRenderMainWindow::openImageDirectory()
         "loadImageDirectory",
         Qt::QueuedConnection,
         Q_ARG(QString, directoryPath));
-    logWindowMessage(QStringLiteral("Loading image directory into D3D11 worker: %1").arg(directoryPath));
+    logWindowMessage(QStringLiteral("Loading image directory into render worker: %1").arg(directoryPath));
 }
 
 void AsyncRenderMainWindow::showNextImage()
@@ -274,6 +292,8 @@ void AsyncRenderMainWindow::setupActions()
     QMenu *renderMenu = menuBar()->addMenu(QStringLiteral("Render"));
     QAction *requestFrameAction = renderMenu->addAction(QStringLiteral("Render Once"));
     connect(requestFrameAction, &QAction::triggered, this, &AsyncRenderMainWindow::requestRender);
+    m_runCpuPreviewAction = renderMenu->addAction(QStringLiteral("Inspect CPU Preview"));
+    connect(m_runCpuPreviewAction, &QAction::triggered, this, &AsyncRenderMainWindow::runCpuPreviewInspection);
 }
 
 void AsyncRenderMainWindow::setupImageEffectControls()
@@ -320,8 +340,8 @@ void AsyncRenderMainWindow::setupImageEffectControls()
 
     layout->addWidget(flipLabel);
     layout->addLayout(flipLayout);
-    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Loops runs additional GLES2 simulator iterations before the result is published into the shared D3D11 slot."), panel));
-    layout->addWidget(new QLabel(QStringLiteral("The worker now uses an independent standalone ANGLE runtime. Publish mode defaults to standalone GPU publish and falls back to CPU only if required."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("GPU Stress Loops controls additional GLES2 processing passes before the GPU result is published into the shared frame slot."), panel));
+    layout->addWidget(new QLabel(QStringLiteral("The worker uses an independent standalone runtime. Publish mode defaults to GPU publish and falls back to CPU only if required."), panel));
     layout->addStretch(1);
 
     connect(m_brightnessSlider, &QSlider::valueChanged, this, &AsyncRenderMainWindow::onImageEffectControlChanged);
@@ -428,4 +448,32 @@ void AsyncRenderMainWindow::requestRender()
     }
 
     QMetaObject::invokeMethod(m_worker, "requestRender", Qt::QueuedConnection);
+}
+
+void AsyncRenderMainWindow::showCpuPreviewDialog(const QImage &image, const QString &description)
+{
+    if (image.isNull()) {
+        return;
+    }
+
+    QLabel *previewLabel = new QLabel;
+    previewLabel->setPixmap(QPixmap::fromImage(image));
+    previewLabel->setMinimumSize(image.size());
+    previewLabel->setScaledContents(false);
+    previewLabel->setAlignment(Qt::AlignCenter);
+
+    QMessageBox dialog(this);
+    dialog.setWindowTitle(QStringLiteral("CPU Preview Inspection"));
+    dialog.setText(description.isEmpty() ? QStringLiteral("Synchronous CPU preview completed.") : description);
+    dialog.layout()->addWidget(previewLabel);
+    dialog.exec();
+}
+
+void AsyncRenderMainWindow::runCpuPreviewInspection()
+{
+    if (!m_workerInitialized || m_worker == nullptr || m_imageCount <= 0) {
+        return;
+    }
+
+    QMetaObject::invokeMethod(m_worker, "requestCpuPreview", Qt::QueuedConnection);
 }

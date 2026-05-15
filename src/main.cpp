@@ -3,6 +3,7 @@
 #include <QSurfaceFormat>
 
 #include "app/async_render_main_window.h"
+#include "framework/backend/platform_render_backend.h"
 #include "framework/core/shared_frame_slot_pool.h"
 #include "image_effect_types.h"
 
@@ -27,7 +28,9 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Gles2AsyncRender"));
     qRegisterMetaType<ImageEffectParameters>("ImageEffectParameters");
-    qRegisterMetaType<ISharedFrameSlotPool *>("ISharedFrameSlotPool*");
+    qRegisterMetaType<IPlatformRenderBackend *>("IPlatformRenderBackend*");
+    qRegisterMetaType<FrameTicket>("FrameTicket");
+    qRegisterMetaType<JobResult>("JobResult");
     qRegisterMetaType<quint64>("quint64");
 
     AsyncRenderMainWindow window;

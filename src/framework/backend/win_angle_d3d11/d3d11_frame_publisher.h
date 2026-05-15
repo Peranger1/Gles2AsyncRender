@@ -1,6 +1,6 @@
 #pragma once
 
-#include "framework/core/artifact_publisher.h"
+#include "framework/core/frame_publisher.h"
 
 #include <QSize>
 #include <QString>
@@ -10,22 +10,22 @@
 #include <memory>
 
 class AngleStandaloneRuntime;
-class ISharedFrameSlotPool;
+class IFrameWriter;
 
-class D3D11FramePublisher final : public IArtifactPublisher
+class D3D11FramePublisher final : public IFramePublisher
 {
 public:
     D3D11FramePublisher();
     ~D3D11FramePublisher();
 
-    bool initialize(IWorkRuntime &runtime, QString *error) override;
+    bool initialize(IWorkRuntime &runtime,
+                    IFrameWriter &frameWriter,
+                    QString *error) override;
     bool publish(const WorkEnvelope &work,
-                 const ArtifactSnapshot &artifact,
-                 PublicationTicket *ticket,
+                 const GpuTextureResult &gpuResult,
+                 FrameTicket *ticket,
                  QString *error) override;
     void shutdown() override;
-
-    void setSlotPool(ISharedFrameSlotPool *slotPool);
 
 private:
     bool publishToSlot(GLuint sourceTextureId,
@@ -37,6 +37,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     AngleStandaloneRuntime *m_runtime = nullptr;
-    ISharedFrameSlotPool *m_slotPool = nullptr;
+    IFrameWriter *m_frameWriter = nullptr;
     quint64 m_publicationCounter = 0;
 };

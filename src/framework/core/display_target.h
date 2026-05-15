@@ -2,10 +2,10 @@
 
 #include <QSize>
 
-class IPresentationTarget
+class IDisplayTarget
 {
 public:
-    virtual ~IPresentationTarget() = default;
+    virtual ~IDisplayTarget() = default;
 
     virtual QSize targetSize() const = 0;
     virtual void requestPresent() = 0;

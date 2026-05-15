@@ -1,8 +1,9 @@
 #include "photo_editor_render_session.h"
 
-#include "photo_editor_render_payload.h"
-#include "photo_editor_gles2_simulator.h"
+#include "photo_editor_gles2_backend.h"
 #include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
+
+#include <mutex>
 
 namespace
 {
@@ -10,6 +11,76 @@ QSize sanitizedSize(const QSize &size)
 {
     return QSize(qMax(1, size.width()), qMax(1, size.height()));
 }
+
+std::once_flag g_photoEditorInitOnce;
+bool g_photoEditorInitSucceeded = false;
+QString g_photoEditorInitError;
+AngleStandaloneRuntime *g_photoEditorRuntime = nullptr;
+}
+
+void PhotoEditorRenderSession::SessionState::reset()
+{
+    handle = nullptr;
+    latestParameters = {};
+    processingParameters = {};
+    hasLatestParameters = false;
+    parametersDirty = false;
+    latestProgress = 0;
+    processInFlight = false;
+    renderReady = false;
+}
+
+bool PhotoEditorRenderSession::initializeLibraryOnce(AngleStandaloneRuntime *runtime, QString *error)
+{
+    if (runtime == nullptr) {
+        if (error) {
+            *error = QStringLiteral("Photo editor render session requires a valid standalone runtime.");
+        }
+        return false;
+    }
+
+    if (!runtime->procTable().isValid()) {
+        if (error) {
+            *error = QStringLiteral("Photo editor render session requires an initialized standalone proc table.");
+        }
+        return false;
+    }
+
+    if (g_photoEditorRuntime != nullptr && g_photoEditorRuntime != runtime) {
+        if (error) {
+            *error = QStringLiteral("photo_editor_init is already bound to a different standalone runtime.");
+        }
+        return false;
+    }
+
+    std::call_once(g_photoEditorInitOnce, [runtime]() {
+        QString initError;
+        g_photoEditorRuntime = runtime;
+        g_photoEditorInitSucceeded = photo_editor_init(&PhotoEditorRenderSession::resolveGlProc, &initError);
+        if (!g_photoEditorInitSucceeded) {
+            g_photoEditorInitError = initError;
+        }
+    });
+
+    if (!g_photoEditorInitSucceeded) {
+        if (error) {
+            *error = g_photoEditorInitError.isEmpty()
+                ? QStringLiteral("photo_editor_init failed.")
+                : g_photoEditorInitError;
+        }
+        return false;
+    }
+
+    return true;
+}
+
+void *PhotoEditorRenderSession::resolveGlProc(const char *name)
+{
+    if (g_photoEditorRuntime == nullptr || name == nullptr) {
+        return nullptr;
+    }
+
+    return g_photoEditorRuntime->resolveProc(name);
 }
 
 bool PhotoEditorRenderSession::initialize(AngleStandaloneRuntime *runtime, QString *error)
@@ -25,12 +96,12 @@ bool PhotoEditorRenderSession::initialize(AngleStandaloneRuntime *runtime, QStri
         return false;
     }
 
-    const bool ok = m_libraryHost.initializeOnce(m_runtime, error);
+    const bool ok = initializeLibraryOnce(m_runtime, error);
     m_runtime->leave();
     return ok;
 }
 
-bool PhotoEditorRenderSession::submitRequest(const PhotoEditorRequest &request,
+bool PhotoEditorRenderSession::submitRequest(const std::shared_ptr<PhotoEditorRenderPayload> &payload,
                                              QObject *callbackContext,
                                              PhotoEditorProgressCallback progressCallback,
                                              void *progressUserData,
@@ -49,9 +120,7 @@ bool PhotoEditorRenderSession::submitRequest(const PhotoEditorRequest &request,
         return false;
     }
 
-    const PhotoEditorRenderPayload *payload =
-        static_cast<const PhotoEditorRenderPayload *>(request.payload.get());
-    if (payload == nullptr || payload->sourceImage.isNull()) {
+    if (!payload || payload->sourceImage.isNull()) {
         if (error) {
             *error = QStringLiteral("The photo editor render payload is missing a valid source image.");
         }
@@ -64,7 +133,9 @@ bool PhotoEditorRenderSession::submitRequest(const PhotoEditorRequest &request,
         return false;
     }
 
-    const QSize safeOutputSize = sanitizedSize(request.outputSize);
+    const QSize safeOutputSize = sanitizedSize(payload->outputSize.isValid()
+        ? payload->outputSize
+        : payload->sourceImage.size());
     if (!ensureSessionForPayload(payload->sourceKey,
                                  payload->sourceImageCacheKey,
                                  payload->sourceImage,
@@ -94,7 +165,6 @@ bool PhotoEditorRenderSession::submitRequest(const PhotoEditorRequest &request,
         return false;
     }
 
-    m_requestSequence = request.sequence;
     m_session.latestParameters = payload->parameters;
     m_session.processingParameters = payload->parameters;
     m_session.hasLatestParameters = true;
@@ -116,29 +186,9 @@ void PhotoEditorRenderSession::handleProgressEvent(int progress, bool isEnd)
     m_session.renderReady = true;
 }
 
-bool PhotoEditorRenderSession::isProcessInFlight() const noexcept
+bool PhotoEditorRenderSession::renderReadyTexture(GLuint *textureId, QSize *size, QString *error)
 {
-    return m_session.processInFlight;
-}
-
-bool PhotoEditorRenderSession::hasRenderReady() const noexcept
-{
-    return m_session.renderReady;
-}
-
-int PhotoEditorRenderSession::latestProgress() const noexcept
-{
-    return m_session.latestProgress;
-}
-
-quint64 PhotoEditorRenderSession::requestSequence() const noexcept
-{
-    return m_requestSequence;
-}
-
-bool PhotoEditorRenderSession::renderReadyTexture(PhotoEditorRenderedTexture *output, QString *error)
-{
-    if (output == nullptr) {
+    if (textureId == nullptr || size == nullptr) {
         if (error) {
             *error = QStringLiteral("The photo editor render output target is invalid.");
         }
@@ -151,23 +201,18 @@ bool PhotoEditorRenderSession::renderReadyTexture(PhotoEditorRenderedTexture *ou
         return false;
     }
 
-    GLuint textureId = 0U;
+    GLuint renderedTextureId = 0U;
     QSize textureSize;
-    const bool ok = photo_editor_render(m_session.handle, &textureId, &textureSize, error);
+    const bool ok = photo_editor_render(m_session.handle, &renderedTextureId, &textureSize, error);
     if (!ok) {
         return false;
     }
 
-    output->textureId = textureId;
-    output->size = textureSize;
+    *textureId = renderedTextureId;
+    *size = textureSize;
     m_session.renderReady = false;
     m_session.latestProgress = 100;
     return true;
-}
-
-void PhotoEditorRenderSession::discardRenderReady()
-{
-    m_session.renderReady = false;
 }
 
 void PhotoEditorRenderSession::shutdown()
@@ -177,7 +222,6 @@ void PhotoEditorRenderSession::shutdown()
     m_sourceKey.clear();
     m_sourceImageCacheKey = 0;
     m_sourceImage = QImage();
-    m_requestSequence = 0;
 }
 
 bool PhotoEditorRenderSession::ensureSessionForPayload(const QString &sourceKey,

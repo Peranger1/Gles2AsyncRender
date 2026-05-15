@@ -3,18 +3,15 @@
 #include "framework/core/work_types.h"
 #include "image_effect_types.h"
 
+#include <QImage>
 #include <QObject>
 #include <QMutex>
 #include <QSize>
 #include <memory>
 
-class AngleStandaloneRuntime;
-class D3D11FramePublisher;
-class IAsyncPipeline;
-class ISharedFrameSlotPool;
-class LatestOnlyWorkScheduler;
-class PhotoEditorWorkProcessor;
-struct PublicationTicket;
+class AsyncTaskFacade;
+class IPlatformRenderBackend;
+struct FrameTicket;
 
 class PhotoEditorAsyncRenderFacade final : public QObject
 {
@@ -25,18 +22,20 @@ public:
     ~PhotoEditorAsyncRenderFacade() override;
 
 public slots:
-    bool initialize(ISharedFrameSlotPool *slotPool, QSize outputSize);
+    bool initialize(IPlatformRenderBackend *backend, QSize outputSize);
     void setOutputSize(QSize size);
     void setEffectParameters(const ImageEffectParameters &parameters);
     void loadImageDirectory(const QString &directoryPath);
     void selectNextImage();
     void selectPreviousImage();
     void requestRender();
+    void requestCpuPreview();
     void onPublicationCapacityAvailable();
     void shutdown();
 
 signals:
-    void frameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex);
+    void jobResultReady(const JobResult &result);
+    void frameReady(const FrameTicket &ticket);
     void initializationFailed(const QString &reason);
     void imageDirectoryLoadFinished(bool loaded,
                                     const QString &errorMessage,
@@ -46,24 +45,26 @@ signals:
                                     QSize imageSize);
     void imageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize);
     void processingProgressChanged(int progress);
+    void cpuPreviewReady(const QImage &image, const QString &description);
 
 private:
     struct ImageCatalogState;
 
-    void handleProgress(quint64 workId, int progress, bool isFinal);
-    void handleFrameReady(const PublicationTicket &ticket);
+    void handleStateChanged(RequestId requestId, WorkState state);
+    void handleProgress(RequestId requestId, int progress, bool isFinal);
+    void handleMessage(RequestId requestId, const QString &message);
+    void handleJobResult(const JobResult &result);
     void handlePipelineError(const QString &reason);
     void emitImageSelection();
     void submitLatestRequest();
+    void submitCpuPreviewRequest();
     WorkEnvelope buildLatestWork() const;
+    WorkEnvelope buildCpuPreviewWork() const;
 
     std::unique_ptr<ImageCatalogState> m_catalog;
-    std::unique_ptr<AngleStandaloneRuntime> m_runtime;
-    std::unique_ptr<PhotoEditorWorkProcessor> m_processor;
-    std::unique_ptr<D3D11FramePublisher> m_publisher;
-    std::unique_ptr<LatestOnlyWorkScheduler> m_scheduler;
-    std::unique_ptr<IAsyncPipeline> m_pipeline;
-    ISharedFrameSlotPool *m_slotPool = nullptr;
+    IPlatformRenderBackend *m_backend = nullptr;
+    std::unique_ptr<AsyncTaskFacade> m_taskFacade;
+    std::unique_ptr<AsyncTaskFacade> m_cpuPreviewTaskFacade;
     ImageEffectParameters m_effectParameters;
     QSize m_outputSize;
     bool m_initialized = false;

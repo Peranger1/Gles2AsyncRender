@@ -1,317 +1,127 @@
 # Gles2AsyncRender Architecture
 
-## 1. 概述
+## 概述
 
-`Gles2AsyncRender` 是一个面向 Windows 的 Qt 5.15.1 图像处理 demo，当前只保留一条主链路：
+当前仓库已经收敛到一套统一的异步渲染主链路：
 
 - UI 线程持有 `QOpenGLWidget`
-- worker 线程持有独立的 standalone ANGLE 运行时
-- worker 将结果渲染到 D3D11 shared texture
-- UI 通过 ANGLE/EGL 导入这些 shared texture，并显示其本地副本
-
-这不是共享 `QOpenGLContext` 的设计。当前架构刻意把显示职责和生产职责分开，让 UI 只负责展示，让 worker 只负责产出。
-
-## 2. 设计目标
-
-- 保持 UI 在 GPU 工作期间仍然流畅响应。
-- 避免 UI 和 worker 争用同一条 ANGLE/D3D11 执行路径。
-- 为未来真实 GPU 算法库预留清晰边界。
-- 通过 slot pool 明确帧交接，而不是隐式复用纹理。
-- 通过复制到 UI 本地显示纹理来降低 resize 抖动。
-
-## 3. 总体结构
-
-```mermaid
-flowchart LR
-    UI["UI 线程"]
-    WIN["AsyncRenderMainWindow"]
-    WGT["QOpenGLWidgetFrameView"]
-    WK["Worker 线程"]
-    FAC["PhotoEditorAsyncRenderFacade"]
-    PIPE["LatestOnlyAsyncPipeline"]
-    SCHED["LatestOnlyWorkScheduler"]
-    PROC["PhotoEditorWorkProcessor"]
-    ALG["PhotoEditorRenderSession / 算法库"]
-    RT["AngleStandaloneRuntime"]
-    PUB["D3D11FramePublisher"]
-    POOL["D3D11SharedSlotPool"]
-    SHARED["D3D11 Shared Texture Slot"]
-    LOCAL["UI 本地显示纹理"]
+- worker 线程持有独立 ANGLE runtime
+- GPU 结果通过 D3D11 shared texture 发布
+- UI 只负责导入、复制和显示
+- 请求调度采用 `SerialConflated` 策略
+- 业务层通过 `AsyncTaskFacade` 接入统一执行框架
 
-    UI --> WIN --> WGT
-    WIN --> FAC
-    FAC --> PIPE
-    WGT --> WIN
-    PIPE --> SCHED
-    PIPE --> PROC
-    PIPE --> RT
-    PIPE --> PUB
-    PROC --> ALG
-    PUB --> POOL
-    PUB --> SHARED
-    WGT --> SHARED
-    WGT --> LOCAL
-    LOCAL --> WGT
-```
+当前代码不再使用旧的 `LatestOnly*` 链路，也不再保留独立的旧 worker 试验入口。
 
-## 4. 模块职责
+## 当前分层
 
-### `src/main.cpp`
+### `src/framework/core`
 
-- 设置 `Qt::AA_UseOpenGLES` 和 `Qt::AA_ShareOpenGLContexts`
-- 将默认 surface format 固定为 OpenGLES 2.0
-- 创建 `AsyncRenderMainWindow`
+- 请求模型：`WorkEnvelope`、`RequestHints`、`JobResult`
+- 调度器：`SerialConflatedWorkScheduler`
+- 执行推进器：`SerialConflatedAsyncPipeline`
+- 通用控制器：`AsyncJobController`
+- 合并策略接口：`IRequestCoalescer`
 
-### `src/app/async_render_main_window.*`
+这一层不关心 Qt widget、D3D11 细节或 photo editor 业务状态。
 
-- 持有主窗口 UI
-- 持有 worker `QThread`
-- 在显示 widget 发出 `frameSwapped()` 后再启动 worker
-- 将菜单、切图和参数变化转发给 worker
-- 接收 worker 的状态和错误
+### `src/framework/backend`
 
-### `src/framework/qt/qopenglwidget_frame_view.*`
+- `platform_render_backend.h`
+  - 平台 backend 总入口
 
-- 持有 `QOpenGLWidget` 显示面
-- 解析 Qt 当前使用的 ANGLE/EGL 入口
-- 导入 pending shared texture
-- 把导入帧复制到本地 UI 纹理
-- 常规绘制时只画本地 UI 纹理
+- `win_angle_d3d11/angle_standalone_runtime.*`
+  - Windows 独立 ANGLE runtime
 
-### `src/app/photo_editor_async_render_facade.*`
+- `win_angle_d3d11/d3d11_frame_publisher.*`
+  - GPU 结果发布为 `FrameTicket`
 
-- 持有图片编辑业务状态
-- 加载图片目录并切换当前图片
-- 把 UI 参数和图片输入收敛成 `WorkEnvelope`
-- 作为 app 层 facade 转发给通用异步 pipeline
+- `win_angle_d3d11/d3d11_shared_slot_pool.h`
+  - shared texture slot 生命周期与读写安全
 
-### `src/framework/core/latest_only_async_pipeline.*`
+### `src/framework/qt`
 
-- 持有 worker 侧通用 latest-only 状态机
-- 创建和管理 runtime、processor、publisher、scheduler
-- 在 `work -> artifact -> publication` 三阶段间推进状态
+- `qopenglwidget_frame_view.*`
+  - `QOpenGLWidget` 壳
+  - 接收 `FrameTicket`
+  - 通过 presenter 读取 pending 帧并复制到本地显示纹理
 
-### `src/framework/core/latest_only_work_scheduler.*`
+- `qt_angle_display_presenter.*`
+  - ANGLE/EGL 导入与 blit 显示逻辑
 
-- 管理 latest-only 请求收敛
-- 保证 UI 高频输入下只保留最新待处理 work
+### `src/app`
 
-### `src/adapters/photo_editor/photo_editor_work_processor.*`
+- `async_render_main_window.*`
+  - app 主窗口
 
-- 将图片编辑业务适配到通用 `IWorkProcessor`
-- 管理单次业务 work 的启动、进度、artifact 收集
-- 不负责 publication 和显示
+- `async_task_facade.*`
+  - app-facing 通用任务 façade
 
-### `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
+- `photo_editor_async_render_facade.*`
+  - 当前 photo editor 业务 façade
+  - 管理图片目录、当前图片、当前参数
+  - 分别驱动 GPU 预览和同步 CPU 预览
 
-- 只保存每个 slot 的元数据
-- 跟踪 `Free`、`Rendering`、`Pending` 状态
-- 防止 worker 在 UI 释放前覆盖 slot
-- 防止 UI 在发布完成前消费 slot
+### `src/adapters/photo_editor`
 
-### `src/framework/backend/win_angle_d3d11/angle_standalone_runtime.*`
+- `photo_editor_work_processor.*`
+  - GPU 异步处理 adapter
 
-- 创建独立的 D3D11 device 和 ANGLE EGL/GLES 上下文
-- 从 Qt 已加载的 ANGLE 模块中解析 EGL/GLES 入口
-- 对外暴露运行时身份信息，便于诊断
+- `photo_editor_cpu_preview_processor.*`
+  - 同步 CPU 预览 adapter
 
-### `src/framework/backend/win_angle_d3d11/d3d11_frame_publisher.*`
+- `photo_editor_render_payload.h`
+  - GPU 预览 payload
 
-- 将 worker 生成的 GL texture 发布到 D3D11 shared texture slot
-- 使用 keyed mutex 保护发布过程
-- 优先走 GPU publish
-- 必要时退回 CPU upload
+- `photo_editor_cpu_preview_payload.h`
+  - CPU 预览 payload
 
-### `src/photo_editor_*`
+## 当前请求模型
 
-- 定义算法库对接 API
-- 提供当前的 GLES2 simulator 实现
-- 封装源图上传、输出目标创建、异步处理和最终渲染
+当前主实现使用两类 lane：
 
-### `src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.*`
+- `photo_editor.preview`
+  - GPU 异步预览
+  - `DeliverOnlyIfLatest`
 
-- 解析 Qt 持有的 ANGLE EGL 模块
-- 提取当前 display 对应的 `EGLDisplay`、`EGLConfig` 和渲染器身份
-- 为导入桥提供和 Qt 一致的运行时
+- `photo_editor.cpu_preview`
+  - 同步 CPU 检查预览
+  - `AlwaysDeliver`
 
-### `src/angle_threading.*`
+这说明当前框架已经不再默认“所有结果都必须是 GPU 帧”。
 
-- 探测 Qt 当前使用的 ANGLE 运行时
-- 在 backend 为 ANGLE/D3D11 时启用 `ID3D11Multithread`
-
-### `src/runtime_diagnostics.*`
-
-- 统一处理 info / warning / diagnostic 日志
-- 只有在设置 `GLES2ASYNC_DIAG` 时才输出详细诊断日志
-
-## 5. 运行时边界
-
-当前有两套独立的 GPU 执行环境：
-
-1. UI 运行时
-   - 由 Qt 和 `QOpenGLWidget` 持有
-   - 仅用于显示侧导入和合成
-
-2. Worker 运行时
-   - 由 `AngleStandaloneRuntime` 持有
-   - 用于算法执行和纹理发布
-
-这两套运行时不会共享同一个 GL context。它们唯一共享的是 D3D11 shared texture handle 以及围绕 handle 的 slot 元数据。
-
-### Runtime Scope 约束
-
-- `IWorkRuntime::enter()/leave()` 是 runtime-bound GPU 资源操作的唯一外层边界。
-- `IArtifactPublisher::initialize()/publish()/shutdown()` 必须在 pipeline 明确建立的 runtime scope 内执行。
-- 业务适配层如果内部自行调用 runtime scope，必须保证不破坏其后的组件初始化顺序。
-- 当前主链路已经移除了旧 worker 兼容层，初始化时序由 `LatestOnlyAsyncPipeline` 统一负责。
-
-## 6. Slot 模型
-
-`D3D11SharedSlotPool` 是核心同步原语。
-
-### Slot 状态
-
-- `Free`
-  - worker 可以在这个 slot 上渲染
-- `Rendering`
-  - slot 当前归 worker 持有，正在写入
-- `Pending`
-  - worker 已发布，等待 UI 消费
-
-### 规则
-
-- 同一时刻只允许一个 pending 帧。
-- worker 必须先拿到 `Free` slot 才能渲染。
-- UI 只消费当前 pending 的 slot。
-- UI 在把帧复制到本地纹理后，立即释放该 slot。
+## 当前结果模型
 
-这样 shared texture 的生命周期就很短，不会让 UI 和 worker 在多个显示周期里长期绑在同一个 slot 上。
+框架当前支持：
 
-## 7. 帧管线
+- `GpuTextureResult`
+  - 通过 publisher 转成 `FrameTicket`
 
-当前帧流程如下：
-
-1. UI 初始化 `QOpenGLWidget`
-2. UI 解析 Qt 当前持有的 ANGLE/EGL 运行时
-3. UI 在第一次 swap 后发出 `displayReadyForWorker()`
-4. Worker 初始化自己的 standalone ANGLE 运行时
-5. Worker 初始化算法宿主和发布桥
-6. Worker 加载图片目录或切换当前图片
-7. Worker 异步运行算法会话
-8. Worker 将结果渲染到一张 GL texture
-9. 发布桥把结果写入一个 D3D11 shared texture slot
-10. Worker 将该 slot 提交为 `Pending`
-11. UI 在 `paintGL()` 中消费 pending slot
-12. UI 把 shared texture 复制到自己的本地显示纹理
-13. UI 将 slot 归还为 `Free`
-14. UI 只绘制本地显示纹理
+- `CpuImageResult`
+  - 直接作为 `JobResult` 交付
 
-## 8. 渲染时序
+- `ICustomResult`
+  - 作为扩展结果保留
 
-```mermaid
-sequenceDiagram
-    participant UI as "UI 线程"
-    participant Win as "AsyncRenderMainWindow"
-    participant Wgt as "QOpenGLWidgetFrameView"
-    participant Fac as "Worker 线程 / PhotoEditorAsyncRenderFacade"
-    participant Pipe as "Worker 线程 / LatestOnlyAsyncPipeline"
-    participant Proc as "Worker 线程 / PhotoEditorWorkProcessor"
-    participant RT as "AngleStandaloneRuntime"
-    participant Alg as "PhotoEditorRenderSession"
-    participant Pub as "D3D11FramePublisher"
-    participant Pool as "D3D11SharedSlotPool"
-
-    UI->>Wgt: initializeGL()
-    Wgt->>Wgt: 解析 Qt 持有的 ANGLE/EGL
-    Wgt-->>Win: glInitialized()
-    Wgt-->>Win: frameSwapped()
-    Win->>Fac: initialize(slotPool, outputSize)
-    Fac->>Pipe: initialize
-    Pipe->>RT: 创建独立 D3D11/ANGLE 运行时
-    Pipe->>Pub: initialize(runtime, slotPool)
-    Pipe->>Proc: initialize(runtime)
-    Proc->>Alg: 准备会话
-
-    UI->>Win: 打开图片 / 修改参数 / 请求渲染
-    Win->>Fac: queued 命令
-    Fac->>Pipe: submit(work)
-    Pipe->>Proc: start(work)
-    Proc->>Alg: process()
-    Alg-->>Proc: 进度回调
-    Pipe->>Proc: collectIfReady()
-    Proc->>Alg: render()
-    Pipe->>Pub: publish(artifact)
-    Pub->>Pool: 更新 slot 元数据
-    Pub-->>Pipe: publication ticket
-    Pipe-->>Wgt: frameReady(slot, generation, size, frameIndex)
-
-    Wgt->>Wgt: paintGL()
-    Wgt->>Pool: consumePendingFrame()
-    Wgt->>Wgt: AcquireSync(1)
-    Wgt->>Wgt: eglBindTexImage()
-    Wgt->>Wgt: 复制到本地显示纹理
-    Wgt->>Wgt: eglReleaseTexImage()
-    Wgt->>Wgt: ReleaseSync(0)
-    Wgt->>Pool: releasePendingSlot()
-    Wgt->>Wgt: 绘制本地显示纹理
-```
-
-## 9. 初始化顺序
-
-启动顺序很重要：
-
-1. `main.cpp` 先设置全局 Qt/GL 属性。
-2. `AsyncRenderMainWindow` 创建显示 widget 和 worker 对象。
-3. `QOpenGLWidgetFrameView::initializeGL()` 解析当前 Qt ANGLE 运行时。
-4. 第一次 `frameSwapped()` 说明显示侧已经足够稳定。
-5. 只有到这一步，窗口才会初始化 worker 运行时。
-
-这个顺序是为了避免早期启动阶段的 `makeCurrent()` 竞态。
-
-## 10. 为什么 UI 要先复制再显示
-
-UI 不直接长期持有 shared slot。
-
-它会先把导入的帧复制到本地显示纹理，原因是：
-
-- 缩短带锁 shared slot 的持有时间
-- 让显示时机和发布时机解耦
-- 提高 resize 稳定性
-- 避免 worker 和 UI 抢同一张正在显示的图
-
-## 11. 算法接入约定
-
-未来的真实 GPU 算法库应该直接接在 `photo_editor_*` API 后面，而不改变外层架构。
-
-需要满足的契约：
-
-- 在 worker 运行时上初始化一次
-- 接收源图输入
-- 接收效果参数
-- 异步处理
-- 渲染出最终 GL texture
-- 将 texture 交给发布桥
-
-外层的 worker / display / 同步设计应该保持不变。
-
-## 12. 运行约束
-
-- 不要让 worker 和 UI 共享同一个 GL context 作为主架构。
-- 不要绕过 slot pool。
-- UI 复制完成后，不要继续保持 slot 为 `Pending`。
-- 不要把 GPU 工作搬回 UI 线程。
-- 不要给 worker 重新加载一份和 Qt 不一致的 EGL/ANGLE 运行时。
-
-## 13. 相关文件
-
-- `src/main.cpp`
-- `src/app/async_render_main_window.cpp`
-- `src/framework/qt/qopenglwidget_frame_view.cpp`
-- `src/d3d11_native_worker.cpp`
-- `src/framework/backend/win_angle_d3d11/d3d11_shared_slot_pool.h`
-- `src/framework/backend/win_angle_d3d11/angle_standalone_runtime.cpp`
-- `src/framework/backend/win_angle_d3d11/d3d11_frame_publisher.cpp`
-- `src/photo_editor_gles2_simulator.cpp`
-- `src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp`
-- `src/angle_threading.cpp`
-- `docs/FAILURE_ANALYSIS.md`
+## 当前线程边界
+
+- UI 线程
+  - `AsyncRenderMainWindow`
+  - `QOpenGLWidgetFrameView`
+
+- worker 线程
+  - `PhotoEditorAsyncRenderFacade`
+  - GPU `AsyncTaskFacade`
+  - CPU preview `AsyncTaskFacade`
+
+worker 线程负责业务请求组织和通用 pipeline 推进；UI 线程只接收最终结果并完成显示或检查。
+
+## 当前仓库边界
+
+当前仓库保留的稳定文档只有：
+
+- [README.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/README.md)
+- [ARCHITECTURE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/ARCHITECTURE.md)
+- [docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md)
+
+其余早期计划、故障分析和试验性设计文档已经移除，避免继续与现行实现并存。

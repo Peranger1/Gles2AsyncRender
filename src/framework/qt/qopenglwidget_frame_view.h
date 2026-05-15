@@ -1,13 +1,12 @@
 #pragma once
 
-#include "framework/core/artifact_presenter.h"
-#include "framework/core/shared_frame_slot_pool.h"
-#include "framework/qt/qopenglwidget_display_host.h"
+#include "framework/core/frame_presenter.h"
 
+#include <QOpenGLFunctions>
 #include <QOpenGLWidget>
 #include <memory>
 
-class QOpenGLWidgetFrameView final : public QOpenGLWidget
+class QOpenGLWidgetFrameView final : public QOpenGLWidget, public IGlDisplayTarget
 {
     Q_OBJECT
 
@@ -15,8 +14,13 @@ public:
     explicit QOpenGLWidgetFrameView(QWidget *parent = nullptr);
     ~QOpenGLWidgetFrameView() override;
 
-    void setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool);
+    void setFrameReader(const std::shared_ptr<IFrameReader> &frameReader);
+    void setPresenter(std::unique_ptr<IFramePresenter> presenter);
     QSize outputPixelSize() const;
+    QSize targetSize() const override;
+    void requestPresent() override;
+    QOpenGLContext *glContext() const override;
+    QOpenGLFunctions *glFunctions() const override;
 
 signals:
     void glInitialized();
@@ -25,7 +29,7 @@ signals:
     void outputSizeChanged(QSize size);
 
 public slots:
-    void onFrameReady(int slotIndex, quint64 generation, QSize size, quint64 frameIndex);
+    void onFrameReady(const FrameTicket &ticket);
 
 protected:
     void initializeGL() override;
@@ -36,9 +40,8 @@ private slots:
     void notifyDisplayReadyForWorker();
 
 private:
-    std::shared_ptr<ISharedFrameSlotPool> m_slotPool;
-    QOpenGLWidgetDisplayHost m_displayHost;
-    std::unique_ptr<IArtifactPresenter> m_presenter;
+    std::shared_ptr<IFrameReader> m_frameReader;
+    std::unique_ptr<IFramePresenter> m_presenter;
     bool m_workerReadyPending = false;
     bool m_shuttingDown = false;
 };

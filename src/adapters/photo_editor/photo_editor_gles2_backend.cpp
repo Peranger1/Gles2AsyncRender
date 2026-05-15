@@ -1,12 +1,10 @@
-#include "photo_editor_gles2_simulator.h"
+#include "photo_editor_gles2_backend.h"
 
 #include "framework/backend/win_angle_d3d11/gles2_proc_table.h"
 #include "framework/backend/win_angle_d3d11/gles2_shader_utils.h"
 #include "runtime_diagnostics.h"
 
 #include <QByteArray>
-#include <QDebug>
-#include <QPointer>
 #include <QThread>
 #include <QTimer>
 #include <QtMath>
@@ -61,11 +59,6 @@ QSize sanitizedSize(const QSize &size)
     return QSize(qMax(1, size.width()), qMax(1, size.height()));
 }
 
-void logSimulatorMessage(const QString &message)
-{
-    RuntimeDiagnostics::logInfo("[PhotoEditorSim]", message);
-}
-
 void logSimulatorDiag(const QString &message)
 {
     RuntimeDiagnostics::logDiag("[PhotoEditorSim]", message);
@@ -88,7 +81,7 @@ bool currentProcTable(QString *error)
     }
 
     if (error) {
-        *error = QStringLiteral("photo_editor_init must complete before using the GLES2 simulator.");
+        *error = QStringLiteral("photo_editor_init must complete before using the GLES2 backend.");
     }
     return false;
 }
@@ -97,7 +90,7 @@ bool ensureProgram(PhotoEditorHandleState *state, QString *error)
 {
     if (state == nullptr) {
         if (error) {
-            *error = QStringLiteral("The simulator program state is missing.");
+            *error = QStringLiteral("The backend program state is missing.");
         }
         return false;
     }
@@ -222,7 +215,7 @@ void main()
         || state->flipLocation < 0
         || state->heavyPassLocation < 0) {
         if (error) {
-            *error = QStringLiteral("The simulator shader program is missing required attributes or uniforms.");
+            *error = QStringLiteral("The backend shader program is missing required attributes or uniforms.");
         }
         Gles2ShaderUtils::deleteProgram(g_procTable, &state->program);
         return false;
@@ -247,7 +240,7 @@ bool ensureSourceTexture(PhotoEditorHandleState *state, QString *error)
     const QImage image = state->sourceImage.convertToFormat(QImage::Format_RGBA8888);
     if (image.isNull()) {
         if (error) {
-            *error = QStringLiteral("The simulator source image is invalid.");
+            *error = QStringLiteral("The backend source image is invalid.");
         }
         return false;
     }
@@ -311,7 +304,7 @@ bool ensureOutputTarget(PhotoEditorHandleState *state, QString *error)
     g_procTable.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         if (error) {
-            *error = QStringLiteral("The simulator framebuffer is incomplete: 0x%1")
+            *error = QStringLiteral("The backend framebuffer is incomplete: 0x%1")
                          .arg(unsigned(status), 0, 16);
         }
         return false;

@@ -1,14 +1,14 @@
 #pragma once
 
-#include "presentation_target.h"
+#include "display_target.h"
 
 class QOpenGLContext;
 class QOpenGLFunctions;
 
-class IGlPresentationTarget : public IPresentationTarget
+class IGlDisplayTarget : public IDisplayTarget
 {
 public:
-    ~IGlPresentationTarget() override = default;
+    ~IGlDisplayTarget() override = default;
 
     virtual QOpenGLContext *glContext() const = 0;
     virtual QOpenGLFunctions *glFunctions() const = 0;

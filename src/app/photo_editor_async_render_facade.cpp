@@ -1,19 +1,20 @@
 #include "photo_editor_async_render_facade.h"
 
+#include "adapters/photo_editor/photo_editor_cpu_preview_processor.h"
+#include "adapters/photo_editor/photo_editor_cpu_preview_payload.h"
 #include "adapters/photo_editor/photo_editor_render_payload.h"
 #include "adapters/photo_editor/photo_editor_work_processor.h"
-#include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
-#include "framework/backend/win_angle_d3d11/d3d11_frame_publisher.h"
-#include "framework/core/async_pipeline.h"
-#include "framework/core/latest_only_async_pipeline.h"
-#include "framework/core/latest_only_work_scheduler.h"
-#include "framework/core/shared_frame_slot_pool.h"
+#include "async_task_facade.h"
+#include "framework/backend/platform_render_backend.h"
+#include "framework/core/noop_work_runtime.h"
 #include "runtime_diagnostics.h"
 
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
 #include <QMutexLocker>
+
+#include <variant>
 
 namespace
 {
@@ -124,45 +125,54 @@ PhotoEditorAsyncRenderFacade::~PhotoEditorAsyncRenderFacade()
     shutdown();
 }
 
-bool PhotoEditorAsyncRenderFacade::initialize(ISharedFrameSlotPool *slotPool, QSize outputSize)
+bool PhotoEditorAsyncRenderFacade::initialize(IPlatformRenderBackend *backend, QSize outputSize)
 {
-    if (m_initialized || slotPool == nullptr) {
+    if (m_initialized || backend == nullptr || backend->frameWriter() == nullptr) {
         return false;
     }
 
-    m_slotPool = slotPool;
+    m_backend = backend;
     m_outputSize = sanitizedSize(outputSize);
-
-    m_runtime = std::make_unique<AngleStandaloneRuntime>();
-    m_processor = std::make_unique<PhotoEditorWorkProcessor>();
-    m_publisher = std::make_unique<D3D11FramePublisher>();
-    m_scheduler = std::make_unique<LatestOnlyWorkScheduler>();
-    m_pipeline = std::make_unique<LatestOnlyAsyncPipeline>();
-    m_publisher->setSlotPool(slotPool);
-
-    m_pipeline->setProgressCallback([this](quint64 workId, int progress, bool isFinal) {
-        Q_UNUSED(workId);
-        handleProgress(workId, progress, isFinal);
-    });
-    m_pipeline->setFrameReadyCallback([this](const PublicationTicket &ticket) {
-        handleFrameReady(ticket);
-    });
-    m_pipeline->setErrorCallback([this](const QString &reason) {
-        handlePipelineError(reason);
-    });
+    m_taskFacade = std::make_unique<AsyncTaskFacade>();
+    m_cpuPreviewTaskFacade = std::make_unique<AsyncTaskFacade>();
+    connect(m_taskFacade.get(), &AsyncTaskFacade::stateChanged,
+            this, &PhotoEditorAsyncRenderFacade::handleStateChanged);
+    connect(m_taskFacade.get(), &AsyncTaskFacade::progressChanged,
+            this, &PhotoEditorAsyncRenderFacade::handleProgress);
+    connect(m_taskFacade.get(), &AsyncTaskFacade::messageEmitted,
+            this, &PhotoEditorAsyncRenderFacade::handleMessage);
+    connect(m_taskFacade.get(), &AsyncTaskFacade::resultReady,
+            this, &PhotoEditorAsyncRenderFacade::handleJobResult);
+    connect(m_taskFacade.get(), &AsyncTaskFacade::fatalError,
+            this, &PhotoEditorAsyncRenderFacade::handlePipelineError);
+    connect(m_cpuPreviewTaskFacade.get(), &AsyncTaskFacade::stateChanged,
+            this, &PhotoEditorAsyncRenderFacade::handleStateChanged);
+    connect(m_cpuPreviewTaskFacade.get(), &AsyncTaskFacade::progressChanged,
+            this, &PhotoEditorAsyncRenderFacade::handleProgress);
+    connect(m_cpuPreviewTaskFacade.get(), &AsyncTaskFacade::messageEmitted,
+            this, &PhotoEditorAsyncRenderFacade::handleMessage);
+    connect(m_cpuPreviewTaskFacade.get(), &AsyncTaskFacade::resultReady,
+            this, &PhotoEditorAsyncRenderFacade::handleJobResult);
+    connect(m_cpuPreviewTaskFacade.get(), &AsyncTaskFacade::fatalError,
+            this, &PhotoEditorAsyncRenderFacade::handlePipelineError);
 
     QString error;
-    if (!m_pipeline->initialize(m_runtime.get(),
-                                m_processor.get(),
-                                m_publisher.get(),
-                                m_scheduler.get(),
-                                &error)) {
+    if (!m_taskFacade->initialize(backend,
+                                  std::make_unique<PhotoEditorWorkProcessor>(),
+                                  m_outputSize,
+                                  &error)) {
+        handlePipelineError(error);
+        shutdown();
+        return false;
+    }
+    if (!m_cpuPreviewTaskFacade->initializeWithoutBackend(std::make_unique<NoopWorkRuntime>(),
+                                                          std::make_unique<PhotoEditorCpuPreviewProcessor>(),
+                                                          &error)) {
         handlePipelineError(error);
         shutdown();
         return false;
     }
 
-    m_slotPool->reset();
     m_initialized = true;
     m_shuttingDown = false;
     m_requestSequence = 0;
@@ -187,6 +197,9 @@ void PhotoEditorAsyncRenderFacade::setOutputSize(QSize size)
     }
 
     if (changed && m_initialized) {
+        if (m_taskFacade) {
+            m_taskFacade->setOutputSize(safeSize);
+        }
         submitLatestRequest();
     }
 }
@@ -288,17 +301,26 @@ void PhotoEditorAsyncRenderFacade::selectPreviousImage()
 
 void PhotoEditorAsyncRenderFacade::requestRender()
 {
-    if (!m_initialized || m_shuttingDown || !m_catalog->hasImage() || !m_pipeline) {
+    if (!m_initialized || m_shuttingDown || !m_catalog->hasImage() || !m_taskFacade) {
         return;
     }
 
-    m_pipeline->pump();
+    m_taskFacade->requestPump();
+}
+
+void PhotoEditorAsyncRenderFacade::requestCpuPreview()
+{
+    if (!m_initialized || m_shuttingDown || !m_catalog->hasImage() || !m_cpuPreviewTaskFacade) {
+        return;
+    }
+
+    submitCpuPreviewRequest();
 }
 
 void PhotoEditorAsyncRenderFacade::onPublicationCapacityAvailable()
 {
-    if (m_pipeline) {
-        m_pipeline->onPublicationCapacityAvailable();
+    if (m_taskFacade) {
+        m_taskFacade->onPublicationCapacityAvailable();
     }
 }
 
@@ -312,41 +334,65 @@ void PhotoEditorAsyncRenderFacade::shutdown()
     m_initialized = false;
     m_requestSequence = 0;
 
-    if (m_pipeline) {
-        m_pipeline->shutdown();
+    if (m_taskFacade) {
+        m_taskFacade->shutdown();
+    }
+    if (m_cpuPreviewTaskFacade) {
+        m_cpuPreviewTaskFacade->shutdown();
     }
 
-    m_pipeline.reset();
-    m_scheduler.reset();
-    m_publisher.reset();
-    m_processor.reset();
-    m_runtime.reset();
-    m_slotPool = nullptr;
+    m_taskFacade.reset();
+    m_cpuPreviewTaskFacade.reset();
+    m_backend = nullptr;
     m_catalog = std::make_unique<ImageCatalogState>();
 }
 
-void PhotoEditorAsyncRenderFacade::handleProgress(quint64 workId, int progress, bool isFinal)
+void PhotoEditorAsyncRenderFacade::handleStateChanged(RequestId requestId, WorkState state)
 {
-    Q_UNUSED(workId);
+    Q_UNUSED(requestId);
+    Q_UNUSED(state);
+}
+
+void PhotoEditorAsyncRenderFacade::handleProgress(RequestId requestId, int progress, bool isFinal)
+{
+    Q_UNUSED(requestId);
     Q_UNUSED(isFinal);
     if (!m_shuttingDown) {
         emit processingProgressChanged(progress);
     }
 }
 
-void PhotoEditorAsyncRenderFacade::handleFrameReady(const PublicationTicket &ticket)
+void PhotoEditorAsyncRenderFacade::handleMessage(RequestId requestId, const QString &message)
+{
+    Q_UNUSED(requestId);
+    if (!m_shuttingDown && !message.isEmpty()) {
+        logFacadeMessage(QStringLiteral("Pipeline message: %1").arg(message));
+    }
+}
+
+void PhotoEditorAsyncRenderFacade::handleJobResult(const JobResult &result)
 {
     if (m_shuttingDown) {
         return;
     }
 
-    const int slotIndex = ticket.transportMetadata.value(QStringLiteral("slotIndex"), -1).toInt();
-    const quint64 generation = ticket.transportMetadata.value(QStringLiteral("generation")).toULongLong();
-    const quint64 frameIndex = ticket.transportMetadata.value(QStringLiteral("frameIndex")).toULongLong();
-    const QSize size = ticket.transportMetadata.value(QStringLiteral("size")).toSize().isValid()
-        ? ticket.transportMetadata.value(QStringLiteral("size")).toSize()
-        : ticket.artifact.logicalSize;
-    emit frameReady(slotIndex, generation, size, frameIndex);
+    emit jobResultReady(result);
+
+    if (std::holds_alternative<FrameTicket>(result.payload)) {
+        emit frameReady(std::get<FrameTicket>(result.payload));
+        return;
+    }
+
+    if (std::holds_alternative<CpuImageResult>(result.payload)) {
+        const CpuImageResult &previewResult = std::get<CpuImageResult>(result.payload);
+        const QString description = previewResult.metadata.value(QStringLiteral("description")).toString();
+        emit cpuPreviewReady(previewResult.image, description);
+        return;
+    }
+
+    logFacadeMessage(QStringLiteral("Ignoring non-frame job result. kind=%1 requestId=%2")
+                         .arg(result.resultKind)
+                         .arg(result.requestId));
 }
 
 void PhotoEditorAsyncRenderFacade::handlePipelineError(const QString &reason)
@@ -374,11 +420,20 @@ void PhotoEditorAsyncRenderFacade::emitImageSelection()
 
 void PhotoEditorAsyncRenderFacade::submitLatestRequest()
 {
-    if (!m_initialized || !m_catalog->hasImage() || !m_pipeline) {
+    if (!m_initialized || !m_catalog->hasImage() || !m_taskFacade) {
         return;
     }
 
-    m_pipeline->submit(buildLatestWork());
+    m_taskFacade->submit(buildLatestWork());
+}
+
+void PhotoEditorAsyncRenderFacade::submitCpuPreviewRequest()
+{
+    if (!m_initialized || !m_catalog->hasImage() || !m_cpuPreviewTaskFacade) {
+        return;
+    }
+
+    m_cpuPreviewTaskFacade->submit(buildCpuPreviewWork());
 }
 
 WorkEnvelope PhotoEditorAsyncRenderFacade::buildLatestWork() const
@@ -386,17 +441,41 @@ WorkEnvelope PhotoEditorAsyncRenderFacade::buildLatestWork() const
     QMutexLocker locker(&m_stateMutex);
 
     WorkEnvelope work;
-    work.workId = ++m_requestSequence;
-    work.streamKey = QStringLiteral("photo_editor.preview");
-    work.workflowKey = QStringLiteral("photo_editor.process");
-    work.coalescing = CoalescingPolicy::LatestOnly;
-    work.hints.insert(QStringLiteral("outputSize"), m_outputSize);
+    work.requestId = ++m_requestSequence;
+    work.version = work.requestId;
+    work.laneId = QStringLiteral("photo_editor.preview");
+    work.mergeKey = work.laneId;
+    work.requestKind = QStringLiteral("photo_editor.process");
+    work.hints.deliveryPolicy = ResultDeliveryPolicy::AlwaysDeliver;
 
     auto payload = std::make_shared<PhotoEditorRenderPayload>();
     payload->sourceKey = m_catalog->currentImagePath;
     payload->sourceImageCacheKey = m_catalog->currentImage.cacheKey();
     payload->sourceImage = m_catalog->currentImage;
     payload->parameters = m_effectParameters;
+    payload->outputSize = m_outputSize;
+    work.payload = payload;
+    return work;
+}
+
+WorkEnvelope PhotoEditorAsyncRenderFacade::buildCpuPreviewWork() const
+{
+    QMutexLocker locker(&m_stateMutex);
+
+    WorkEnvelope work;
+    work.requestId = ++m_requestSequence;
+    work.version = work.requestId;
+    work.laneId = QStringLiteral("photo_editor.cpu_preview");
+    work.mergeKey = work.laneId;
+    work.requestKind = QStringLiteral("photo_editor.cpu_preview");
+    work.hints.deliveryPolicy = ResultDeliveryPolicy::AlwaysDeliver;
+
+    auto payload = std::make_shared<PhotoEditorCpuPreviewPayload>();
+    payload->sourceKey = m_catalog->currentImagePath;
+    payload->sourceImageCacheKey = m_catalog->currentImage.cacheKey();
+    payload->sourceImage = m_catalog->currentImage;
+    payload->parameters = m_effectParameters;
+    payload->previewSize = m_outputSize.boundedTo(QSize(320, 320));
     work.payload = payload;
     return work;
 }

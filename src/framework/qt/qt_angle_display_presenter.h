@@ -1,11 +1,11 @@
 #pragma once
 
-#include "src/framework/core/artifact_presenter.h"
-#include "src/framework/core/gl_presentation_target.h"
-#include "src/framework/core/shared_frame_slot_pool.h"
+#include "framework/core/frame_presenter.h"
 
+#include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
+#include <functional>
 #include <memory>
 
 #include <QtANGLE/EGL/egl.h>
@@ -19,17 +19,19 @@ namespace QtAngleEglTools
 struct ResolvedEglApi;
 }
 
-class QtAngleDisplayPresenter final : public IArtifactPresenter
+class QtAngleDisplayPresenter final : public IFramePresenter
 {
 public:
     QtAngleDisplayPresenter();
     ~QtAngleDisplayPresenter();
 
-    void setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool);
     QString lastRuntimeLog() const;
-    bool initialize(IPresentationTarget &target, QString *error) override;
-    bool enqueue(const PublicationTicket &ticket, QString *error) override;
-    bool present(PresentationFeedback *feedback, QString *error) override;
+    bool initialize(IDisplayTarget &target,
+                    IFrameReader &frameReader,
+                    QString *error) override;
+    bool enqueue(const FrameTicket &ticket, QString *error) override;
+    bool present(FramePresentationFeedback *feedback, QString *error) override;
+    QString diagnosticText() const override;
     void shutdown() override;
     void onOutputSizeChanged(const QSize &size);
 
@@ -45,23 +47,37 @@ private:
         Microsoft::WRL::ComPtr<IDXGIKeyedMutex> keyedMutex;
     };
 
+    struct GlTargetContext final
+    {
+        QOpenGLContext *context = nullptr;
+        QOpenGLFunctions *functions = nullptr;
+        std::function<QSize()> targetSize;
+        std::function<void()> requestPresent;
+    };
+
     bool createProgram(QString *error);
-    bool initialize(IGlPresentationTarget *target, QString *error, QString *runtimeLog);
+    bool initialize(const GlTargetContext &targetContext,
+                    IFrameReader *frameReader,
+                    QString *error,
+                    QString *runtimeLog);
     bool ensureDisplayTarget(const QSize &size, QString *error);
-    bool copyFrameToDisplayTexture(const PublishedFrame &frame, QString *error);
+    bool copyFrameToDisplayTexture(const FrameTicket &frame, QString *error);
     bool ensureImportedSlot(int slotIndex, QString *error);
-    void consume(const PublishedFrame &frame);
-    bool paint(PresentationFeedback *feedback, QString *error);
+    void consume(const FrameTicket &frame);
+    bool paint(FramePresentationFeedback *feedback, QString *error);
     void destroyImportedSlot(int slotIndex);
     void destroyDisplayTarget();
 
-    IGlPresentationTarget *m_target = nullptr;
+    QSize currentTargetSize() const;
+    void requestPresentUpdate();
+
+    QOpenGLContext *m_targetContext = nullptr;
     QOpenGLFunctions *m_gl = nullptr;
     QOpenGLShaderProgram m_program;
     int m_positionLocation = -1;
     int m_texCoordLocation = -1;
     int m_samplerLocation = -1;
-    std::shared_ptr<ISharedFrameSlotPool> m_slotPool;
+    IFrameReader *m_frameReader = nullptr;
     QtAngleEglTools::ResolvedEglApi *m_eglApi = nullptr;
     EGLDisplay m_eglDisplay = EGL_NO_DISPLAY;
     EGLConfig m_eglConfig = nullptr;
@@ -70,9 +86,11 @@ private:
     GLuint m_displayTextureId = 0U;
     GLuint m_displayFramebufferId = 0U;
     QSize m_displayTextureSize;
-    PublishedFrame m_pendingFrame;
+    std::function<QSize()> m_targetSizeProvider;
+    std::function<void()> m_requestPresent;
+    FrameTicket m_pendingFrame;
     bool m_hasPendingFrame = false;
-    PublishedFrame m_displayFrame;
+    FrameTicket m_displayFrame;
     bool m_hasDisplayFrame = false;
     bool m_initialized = false;
     QString m_runtimeLog;

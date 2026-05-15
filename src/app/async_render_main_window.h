@@ -2,14 +2,15 @@
 
 #include "image_effect_types.h"
 
+#include <QImage>
 #include <QMainWindow>
 #include <QSize>
 #include <QThread>
 #include <memory>
 
 class QAction;
+class IPlatformRenderBackend;
 class QOpenGLWidgetFrameView;
-class D3D11SharedSlotPool;
 class PhotoEditorAsyncRenderFacade;
 class QLabel;
 class QDockWidget;
@@ -41,6 +42,8 @@ private slots:
                                       QSize imageSize);
     void onImageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize);
     void onWorkerError(const QString &reason);
+    void showCpuPreviewDialog(const QImage &image, const QString &description);
+    void runCpuPreviewInspection();
 
 private:
     void setupActions();
@@ -52,13 +55,14 @@ private:
     void requestRender();
 
     QOpenGLWidgetFrameView *m_displayWidget = nullptr;
-    std::shared_ptr<D3D11SharedSlotPool> m_slotPool;
+    std::unique_ptr<IPlatformRenderBackend> m_renderBackend;
     PhotoEditorAsyncRenderFacade *m_worker = nullptr;
     QThread m_workerThread;
 
     QAction *m_openDirectoryAction = nullptr;
     QAction *m_previousImageAction = nullptr;
     QAction *m_nextImageAction = nullptr;
+    QAction *m_runCpuPreviewAction = nullptr;
     QDockWidget *m_imageEffectDock = nullptr;
     QLabel *m_brightnessValueLabel = nullptr;
     QLabel *m_contrastValueLabel = nullptr;

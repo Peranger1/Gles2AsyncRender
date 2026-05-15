@@ -6,9 +6,7 @@
 #include <QSize>
 #include <QVector>
 
-using D3D11SharedFrame = PublishedFrame;
-
-class D3D11SharedSlotPool final : public ISharedFrameSlotPool
+class D3D11SharedSlotPool final : public IFrameWriter
 {
 public:
     explicit D3D11SharedSlotPool(int slotCount = 3)
@@ -47,10 +45,10 @@ public:
         slot.generation = generation;
     }
 
-    bool querySlot(int slotIndex, D3D11SharedFrame *frame) const override
+    bool querySlot(int slotIndex, FrameSlotInfo *slotInfo) const override
     {
         QMutexLocker locker(&m_mutex);
-        if (!isValidSlotIndex(slotIndex) || frame == nullptr) {
+        if (!isValidSlotIndex(slotIndex) || slotInfo == nullptr) {
             return false;
         }
 
@@ -59,11 +57,10 @@ public:
             return false;
         }
 
-        frame->slotIndex = slotIndex;
-        frame->sharedHandle = slot.sharedHandle;
-        frame->size = slot.size;
-        frame->generation = slot.generation;
-        frame->frameIndex = slot.frameIndex;
+        Q_UNUSED(slotIndex);
+        slotInfo->sharedHandle = slot.sharedHandle;
+        slotInfo->size = slot.size;
+        slotInfo->generation = slot.generation;
         return true;
     }
 
@@ -100,10 +97,10 @@ public:
         }
     }
 
-    bool submitRenderedFrame(int slotIndex, quint64 frameIndex, D3D11SharedFrame *frame) override
+    bool submitRenderedFrame(int slotIndex, quint64 frameIndex, FrameTicket *ticket) override
     {
         QMutexLocker locker(&m_mutex);
-        if (!isValidSlotIndex(slotIndex) || frame == nullptr) {
+        if (!isValidSlotIndex(slotIndex) || ticket == nullptr) {
             return false;
         }
 
@@ -120,31 +117,31 @@ public:
         slot.frameIndex = frameIndex;
         m_pendingSlot = slotIndex;
 
-        frame->slotIndex = slotIndex;
-        frame->sharedHandle = slot.sharedHandle;
-        frame->size = slot.size;
-        frame->generation = slot.generation;
-        frame->frameIndex = slot.frameIndex;
+        ticket->slotIndex = slotIndex;
+        ticket->generation = slot.generation;
+        ticket->frameIndex = slot.frameIndex;
+        ticket->size = slot.size;
         return true;
     }
 
-    bool consumePendingFrame(int slotIndex, D3D11SharedFrame *frame) override
+    bool consumePendingFrame(const FrameTicket &ticket, FrameSlotInfo *slotInfo) override
     {
         QMutexLocker locker(&m_mutex);
-        if (!isValidSlotIndex(slotIndex) || m_pendingSlot != slotIndex || frame == nullptr) {
+        if (!isValidSlotIndex(ticket.slotIndex) || m_pendingSlot != ticket.slotIndex || slotInfo == nullptr) {
             return false;
         }
 
-        const Slot &slot = m_slots[slotIndex];
+        const Slot &slot = m_slots[ticket.slotIndex];
         if (slot.state != SlotState::Pending) {
             return false;
         }
+        if (slot.generation != ticket.generation || slot.frameIndex != ticket.frameIndex) {
+            return false;
+        }
 
-        frame->slotIndex = slotIndex;
-        frame->sharedHandle = slot.sharedHandle;
-        frame->size = slot.size;
-        frame->generation = slot.generation;
-        frame->frameIndex = slot.frameIndex;
+        slotInfo->sharedHandle = slot.sharedHandle;
+        slotInfo->size = slot.size;
+        slotInfo->generation = slot.generation;
         return true;
     }
 

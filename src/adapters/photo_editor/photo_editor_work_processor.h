@@ -3,7 +3,6 @@
 #include "framework/core/work_processor.h"
 
 #include <QObject>
-#include <QPointer>
 
 #include <memory>
 
@@ -23,9 +22,8 @@ public:
     bool start(const WorkEnvelope &work,
                IWorkObserver *observer,
                QString *error) override;
-    bool isArtifactReady() const override;
-    bool collectIfReady(IArtifactBuilder &builder, QString *error) override;
-    void cancel(quint64 workId) override;
+    bool isOutputReady() const override;
+    bool collectOutputIfReady(ProcessorOutput *output, QString *error) override;
     void shutdown() override;
 
 private slots:
@@ -34,11 +32,10 @@ private slots:
 private:
     struct ActiveExecution final
     {
-        quint64 workId = 0;
-        quint64 sequence = 0;
+        RequestId requestId = 0;
+        QString outputKind;
         IWorkObserver *observer = nullptr;
-        QMap<QString, QVariant> artifactMetadata;
-        bool artifactReady = false;
+        bool outputReady = false;
     };
 
     static void processProgressThunk(int progress, bool isEnd, void *userData);
@@ -47,9 +44,7 @@ private:
 
     std::unique_ptr<PhotoEditorRenderSession> m_session;
     AngleStandaloneRuntime *m_runtime = nullptr;
-    IWorkRuntime *m_workRuntime = nullptr;
     ProcessorWakeCallback m_wakeCallback;
     ActiveExecution m_activeExecution;
     bool m_hasActiveExecution = false;
-    bool m_cancelRequested = false;
 };

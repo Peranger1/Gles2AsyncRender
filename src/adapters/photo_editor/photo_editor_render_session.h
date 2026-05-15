@@ -1,7 +1,6 @@
 #pragma once
 
-#include "photo_editor_library_host.h"
-#include "photo_editor_session.h"
+#include "photo_editor_render_payload.h"
 
 #include <QObject>
 #include <QImage>
@@ -14,38 +13,37 @@ class AngleStandaloneRuntime;
 
 using PhotoEditorProgressCallback = void (*)(int progress, bool isEnd, void *userData);
 
-struct PhotoEditorRequest final
-{
-    quint64 sequence = 0;
-    QSize outputSize;
-    std::shared_ptr<void> payload;
-};
-
-struct PhotoEditorRenderedTexture final
-{
-    GLuint textureId = 0U;
-    QSize size;
-};
-
 class PhotoEditorRenderSession final
 {
 public:
     bool initialize(AngleStandaloneRuntime *runtime, QString *error);
-    bool submitRequest(const PhotoEditorRequest &request,
+    bool submitRequest(const std::shared_ptr<PhotoEditorRenderPayload> &payload,
                        QObject *callbackContext,
                        PhotoEditorProgressCallback progressCallback,
                        void *progressUserData,
                        QString *error);
     void handleProgressEvent(int progress, bool isEnd);
-    bool isProcessInFlight() const noexcept;
-    bool hasRenderReady() const noexcept;
-    int latestProgress() const noexcept;
-    quint64 requestSequence() const noexcept;
-    bool renderReadyTexture(PhotoEditorRenderedTexture *output, QString *error);
-    void discardRenderReady();
+    bool renderReadyTexture(GLuint *textureId, QSize *size, QString *error);
     void shutdown();
 
 private:
+    struct SessionState final
+    {
+        void *handle = nullptr;
+        ImageEffectParameters latestParameters;
+        ImageEffectParameters processingParameters;
+        bool hasLatestParameters = false;
+        bool parametersDirty = false;
+        int latestProgress = 0;
+        bool processInFlight = false;
+        bool renderReady = false;
+
+        void reset();
+    };
+
+    static bool initializeLibraryOnce(AngleStandaloneRuntime *runtime, QString *error);
+    static void *resolveGlProc(const char *name);
+
     bool ensureSessionForPayload(const QString &sourceKey,
                                  quint64 sourceImageCacheKey,
                                  const QImage &sourceImage,
@@ -55,10 +53,8 @@ private:
     void destroySession();
 
     AngleStandaloneRuntime *m_runtime = nullptr;
-    PhotoEditorLibraryHost m_libraryHost;
-    PhotoEditorSession m_session;
+    SessionState m_session;
     QString m_sourceKey;
     quint64 m_sourceImageCacheKey = 0;
     QImage m_sourceImage;
-    quint64 m_requestSequence = 0;
 };

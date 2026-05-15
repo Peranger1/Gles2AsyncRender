@@ -1,19 +1,10 @@
 #include "photo_editor_work_processor.h"
 
 #include "framework/backend/win_angle_d3d11/angle_standalone_runtime.h"
-#include "photo_editor_render_session.h"
 #include "photo_editor_render_payload.h"
-#include "framework/core/artifact_builder.h"
+#include "photo_editor_render_session.h"
 
 #include <QMetaObject>
-
-namespace
-{
-QSize safeOutputSize(const QSize &size)
-{
-    return QSize(qMax(1, size.width()), qMax(1, size.height()));
-}
-}
 
 PhotoEditorWorkProcessor::PhotoEditorWorkProcessor(QObject *parent)
     : QObject(parent)
@@ -28,7 +19,6 @@ PhotoEditorWorkProcessor::~PhotoEditorWorkProcessor()
 
 bool PhotoEditorWorkProcessor::initialize(IWorkRuntime &runtime, QString *error)
 {
-    m_workRuntime = &runtime;
     m_runtime = dynamic_cast<AngleStandaloneRuntime *>(&runtime);
     if (m_runtime == nullptr) {
         if (error) {
@@ -62,7 +52,7 @@ bool PhotoEditorWorkProcessor::start(const WorkEnvelope &work,
         return false;
     }
 
-    const auto payload = std::static_pointer_cast<PhotoEditorRenderPayload>(work.payload);
+    const auto payload = std::dynamic_pointer_cast<PhotoEditorRenderPayload>(work.payload);
     if (!payload || payload->sourceImage.isNull()) {
         if (error) {
             *error = QStringLiteral("PhotoEditor work is missing a valid payload.");
@@ -71,31 +61,17 @@ bool PhotoEditorWorkProcessor::start(const WorkEnvelope &work,
     }
 
     if (observer) {
-        observer->onStateChanged(work.workId, WorkState::Admitted);
-        observer->onStateChanged(work.workId, WorkState::Executing);
+        observer->onStateChanged(work.requestId, WorkState::Admitted);
+        observer->onStateChanged(work.requestId, WorkState::Executing);
     }
 
-    PhotoEditorRequest request;
-    request.sequence = work.workId;
-    const QSize hintedOutputSize = work.hints.value(QStringLiteral("outputSize")).toSize();
-    request.outputSize = hintedOutputSize.isValid()
-        ? safeOutputSize(hintedOutputSize)
-        : safeOutputSize(payload->sourceImage.size());
-    request.payload = payload;
-
-    m_cancelRequested = false;
     m_activeExecution = {};
-    m_activeExecution.workId = work.workId;
-    m_activeExecution.sequence = request.sequence;
+    m_activeExecution.requestId = work.requestId;
+    m_activeExecution.outputKind = QStringLiteral("photo_editor.preview_frame");
     m_activeExecution.observer = observer;
-    m_activeExecution.artifactMetadata.insert(QStringLiteral("sourceKey"), payload->sourceKey);
-    m_activeExecution.artifactMetadata.insert(QStringLiteral("sourceImageCacheKey"), qulonglong(payload->sourceImageCacheKey));
-    m_activeExecution.artifactMetadata.insert(QStringLiteral("workflowKey"), work.workflowKey);
-    m_activeExecution.artifactMetadata.insert(QStringLiteral("streamKey"), work.streamKey);
-    m_activeExecution.artifactMetadata.insert(QStringLiteral("workId"), qulonglong(work.workId));
     m_hasActiveExecution = true;
 
-    const bool submitOk = m_session->submitRequest(request,
+    const bool submitOk = m_session->submitRequest(payload,
                                                    this,
                                                    &PhotoEditorWorkProcessor::processProgressThunk,
                                                    this,
@@ -108,30 +84,26 @@ bool PhotoEditorWorkProcessor::start(const WorkEnvelope &work,
     return true;
 }
 
-bool PhotoEditorWorkProcessor::isArtifactReady() const
+bool PhotoEditorWorkProcessor::isOutputReady() const
 {
-    return m_hasActiveExecution && m_activeExecution.artifactReady;
+    return m_hasActiveExecution && m_activeExecution.outputReady;
 }
 
-bool PhotoEditorWorkProcessor::collectIfReady(IArtifactBuilder &builder, QString *error)
+bool PhotoEditorWorkProcessor::collectOutputIfReady(ProcessorOutput *output, QString *error)
 {
+    if (output == nullptr) {
+        if (error) {
+            *error = QStringLiteral("PhotoEditorWorkProcessor requires a valid output target.");
+        }
+        return false;
+    }
     if (!m_hasActiveExecution) {
         if (error) {
             *error = QStringLiteral("PhotoEditorWorkProcessor has no active work.");
         }
         return false;
     }
-    if (m_cancelRequested) {
-        if (m_activeExecution.observer) {
-            m_activeExecution.observer->onStateChanged(m_activeExecution.workId, WorkState::Cancelled);
-        }
-        if (error) {
-            *error = QStringLiteral("PhotoEditor work was cancelled.");
-        }
-        clearActiveExecution();
-        return false;
-    }
-    if (!m_activeExecution.artifactReady) {
+    if (!m_activeExecution.outputReady) {
         if (error) {
             error->clear();
         }
@@ -139,39 +111,35 @@ bool PhotoEditorWorkProcessor::collectIfReady(IArtifactBuilder &builder, QString
     }
 
     if (m_activeExecution.observer) {
-        m_activeExecution.observer->onStateChanged(m_activeExecution.workId, WorkState::ProducingArtifact);
+        m_activeExecution.observer->onStateChanged(m_activeExecution.requestId, WorkState::ProducingOutput);
     }
 
-    PhotoEditorRenderedTexture output;
-    if (!m_session->renderReadyTexture(&output, error)) {
+    GLuint renderedTextureId = 0U;
+    QSize renderedTextureSize;
+    if (!m_session->renderReadyTexture(&renderedTextureId, &renderedTextureSize, error)) {
         clearActiveExecution();
         return false;
     }
 
-    QMap<QString, QVariant> metadata = m_activeExecution.artifactMetadata;
-    metadata.insert(QStringLiteral("workSequence"), qulonglong(m_activeExecution.sequence));
-    const bool buildOk = builder.setTexture(output.textureId, output.size, metadata, error);
+    ProcessorOutput processorOutput;
+    processorOutput.requestId = m_activeExecution.requestId;
+    processorOutput.outputKind = m_activeExecution.outputKind;
+    GpuTextureResult textureResult;
+    textureResult.textureId = renderedTextureId;
+    textureResult.size = renderedTextureSize;
+    processorOutput.payload = textureResult;
     clearActiveExecution();
-    return buildOk;
-}
-
-void PhotoEditorWorkProcessor::cancel(quint64 workId)
-{
-    if (m_hasActiveExecution && m_activeExecution.workId == workId) {
-        m_cancelRequested = true;
-        invokeWakeCallback();
-    }
+    *output = std::move(processorOutput);
+    return true;
 }
 
 void PhotoEditorWorkProcessor::shutdown()
 {
-    m_cancelRequested = true;
     clearActiveExecution();
     if (m_session) {
         m_session->shutdown();
     }
     m_runtime = nullptr;
-    m_workRuntime = nullptr;
     m_wakeCallback = {};
 }
 
@@ -183,11 +151,11 @@ void PhotoEditorWorkProcessor::onProgressEvent(int progress, bool isEnd)
 
     m_session->handleProgressEvent(progress, isEnd);
     if (m_hasActiveExecution && m_activeExecution.observer != nullptr) {
-        m_activeExecution.observer->onProgress(m_activeExecution.workId, progress, isEnd);
+        m_activeExecution.observer->onProgress(m_activeExecution.requestId, progress, isEnd);
     }
 
     if (m_hasActiveExecution && isEnd) {
-        m_activeExecution.artifactReady = true;
+        m_activeExecution.outputReady = true;
         invokeWakeCallback();
     }
 }
@@ -210,7 +178,6 @@ void PhotoEditorWorkProcessor::clearActiveExecution()
 {
     m_activeExecution = {};
     m_hasActiveExecution = false;
-    m_cancelRequested = false;
 }
 
 void PhotoEditorWorkProcessor::invokeWakeCallback()

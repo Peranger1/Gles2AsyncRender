@@ -66,20 +66,16 @@ QtAngleDisplayPresenter::~QtAngleDisplayPresenter()
     shutdown();
 }
 
-void QtAngleDisplayPresenter::setSlotPool(const std::shared_ptr<ISharedFrameSlotPool> &slotPool)
-{
-    m_slotPool = slotPool;
-    m_importedSlots.resize(slotPool ? slotPool->slotCount() : 0);
-}
-
 QString QtAngleDisplayPresenter::lastRuntimeLog() const
 {
     return m_runtimeLog;
 }
 
-bool QtAngleDisplayPresenter::initialize(IPresentationTarget &target, QString *error)
+bool QtAngleDisplayPresenter::initialize(IDisplayTarget &target,
+                                         IFrameReader &frameReader,
+                                         QString *error)
 {
-    auto *glTarget = dynamic_cast<IGlPresentationTarget *>(&target);
+    auto *glTarget = dynamic_cast<IGlDisplayTarget *>(&target);
     if (glTarget == nullptr) {
         if (error) {
             *error = QStringLiteral("QtAngleDisplayPresenter requires a GL-capable presentation target.");
@@ -87,41 +83,46 @@ bool QtAngleDisplayPresenter::initialize(IPresentationTarget &target, QString *e
         return false;
     }
 
+    GlTargetContext targetContext;
+    targetContext.context = glTarget->glContext();
+    targetContext.functions = glTarget->glFunctions();
+    targetContext.targetSize = [glTarget]() {
+        return glTarget->targetSize();
+    };
+    targetContext.requestPresent = [glTarget]() {
+        glTarget->requestPresent();
+    };
+
     QString runtimeLog;
-    const bool ok = initialize(glTarget, error, &runtimeLog);
+    const bool ok = initialize(targetContext, &frameReader, error, &runtimeLog);
     m_runtimeLog = runtimeLog;
     return ok;
 }
 
-bool QtAngleDisplayPresenter::enqueue(const PublicationTicket &ticket, QString *error)
+bool QtAngleDisplayPresenter::enqueue(const FrameTicket &ticket, QString *error)
 {
-    Q_UNUSED(error);
-
-    PublishedFrame frame;
-    frame.slotIndex = ticket.transportMetadata.value(QStringLiteral("slotIndex"), -1).toInt();
-    frame.sharedHandle = ticket.transportMetadata.value(QStringLiteral("sharedHandle")).toULongLong();
-    frame.size = ticket.transportMetadata.value(QStringLiteral("size")).toSize().isValid()
-        ? ticket.transportMetadata.value(QStringLiteral("size")).toSize()
-        : ticket.artifact.logicalSize;
-    frame.generation = ticket.transportMetadata.value(QStringLiteral("generation")).toULongLong();
-    frame.frameIndex = ticket.transportMetadata.value(QStringLiteral("frameIndex")).toULongLong();
-    if (frame.slotIndex < 0) {
+    if (ticket.slotIndex < 0) {
         if (error) {
-            *error = QStringLiteral("Publication ticket is missing a valid slot index.");
+            *error = QStringLiteral("Frame ticket is missing a valid slot index.");
         }
         return false;
     }
 
-    consume(frame);
-    if (m_target != nullptr) {
-        m_target->requestPresent();
+    consume(ticket);
+    if (m_targetContext != nullptr) {
+        requestPresentUpdate();
     }
     return true;
 }
 
-bool QtAngleDisplayPresenter::present(PresentationFeedback *feedback, QString *error)
+bool QtAngleDisplayPresenter::present(FramePresentationFeedback *feedback, QString *error)
 {
     return paint(feedback, error);
+}
+
+QString QtAngleDisplayPresenter::diagnosticText() const
+{
+    return m_runtimeLog;
 }
 
 void QtAngleDisplayPresenter::shutdown()
@@ -136,33 +137,32 @@ void QtAngleDisplayPresenter::shutdown()
     destroyDisplayTarget();
     m_initialized = false;
     m_gl = nullptr;
+    m_frameReader = nullptr;
     m_eglApi = nullptr;
     m_eglDisplay = EGL_NO_DISPLAY;
     m_eglConfig = nullptr;
+    m_targetSizeProvider = {};
+    m_requestPresent = {};
 }
 
-bool QtAngleDisplayPresenter::initialize(IGlPresentationTarget *target,
+bool QtAngleDisplayPresenter::initialize(const GlTargetContext &targetContext,
+                                         IFrameReader *frameReader,
                                          QString *error,
                                          QString *runtimeLog)
 {
-    if (target == nullptr) {
+    if (targetContext.context == nullptr || targetContext.functions == nullptr) {
         if (error) {
             *error = QStringLiteral("QtAngleDisplayPresenter requires a valid GL presentation target.");
         }
         return false;
     }
 
-    QOpenGLContext *context = target->glContext();
-    QOpenGLFunctions *functions = target->glFunctions();
-    if (context == nullptr || functions == nullptr) {
-        if (error) {
-            *error = QStringLiteral("QtAngleDisplayPresenter requires a valid GL context and function table.");
-        }
-        return false;
-    }
-
-    m_target = target;
-    m_gl = functions;
+    QOpenGLContext *context = targetContext.context;
+    m_targetContext = context;
+    m_gl = targetContext.functions;
+    m_frameReader = frameReader;
+    m_targetSizeProvider = targetContext.targetSize;
+    m_requestPresent = targetContext.requestPresent;
 
     if (!createProgram(error)) {
         return false;
@@ -221,7 +221,8 @@ bool QtAngleDisplayPresenter::initialize(IGlPresentationTarget *target,
     }
 
     m_initialized = true;
-    onOutputSizeChanged(m_target->targetSize());
+    m_importedSlots.resize(m_frameReader ? m_frameReader->slotCount() : 0);
+    onOutputSizeChanged(currentTargetSize());
     return true;
 }
 
@@ -230,47 +231,40 @@ void QtAngleDisplayPresenter::onOutputSizeChanged(const QSize &size)
     Q_UNUSED(size);
 }
 
-void QtAngleDisplayPresenter::consume(const PublishedFrame &frame)
+void QtAngleDisplayPresenter::consume(const FrameTicket &frame)
 {
     m_pendingFrame = frame;
-    if (m_slotPool) {
-        PublishedFrame slotInfo;
-        if (m_slotPool->querySlot(frame.slotIndex, &slotInfo)) {
-            m_pendingFrame.sharedHandle = slotInfo.sharedHandle;
-        }
-    }
     m_hasPendingFrame = true;
 }
 
-bool QtAngleDisplayPresenter::paint(PresentationFeedback *feedback, QString *error)
+bool QtAngleDisplayPresenter::paint(FramePresentationFeedback *feedback, QString *error)
 {
     if (feedback != nullptr) {
         feedback->releasedPublicationCapacity = false;
     }
 
-    if (!m_gl || m_target == nullptr) {
+    if (!m_gl || m_targetContext == nullptr) {
         if (error) {
             *error = QStringLiteral("QtAngleDisplayPresenter is missing a valid GL presentation target or GL functions.");
         }
         return false;
     }
 
-    const QSize viewportSize = m_target->targetSize();
+    const QSize viewportSize = currentTargetSize();
     m_gl->glViewport(0, 0, viewportSize.width(), viewportSize.height());
     m_gl->glClear(GL_COLOR_BUFFER_BIT);
 
-    if (m_hasPendingFrame && m_slotPool) {
-        PublishedFrame pendingFrame;
-        if (m_slotPool->consumePendingFrame(m_pendingFrame.slotIndex, &pendingFrame)) {
-            const bool copied = copyFrameToDisplayTexture(pendingFrame, error);
-            if (m_slotPool) {
-                m_slotPool->releasePendingSlot(pendingFrame.slotIndex);
-            }
+    if (m_hasPendingFrame && m_frameReader) {
+        FrameSlotInfo pendingSlot;
+        if (m_frameReader->consumePendingFrame(m_pendingFrame, &pendingSlot)) {
+            Q_UNUSED(pendingSlot);
+            const bool copied = copyFrameToDisplayTexture(m_pendingFrame, error);
+            m_frameReader->releasePendingSlot(m_pendingFrame.slotIndex);
             if (feedback != nullptr) {
                 feedback->releasedPublicationCapacity = true;
             }
             if (copied) {
-                m_displayFrame = pendingFrame;
+                m_displayFrame = m_pendingFrame;
                 m_hasDisplayFrame = true;
             }
         }
@@ -297,6 +291,18 @@ bool QtAngleDisplayPresenter::paint(PresentationFeedback *feedback, QString *err
     m_gl->glBindTexture(GL_TEXTURE_2D, 0);
     m_program.release();
     return true;
+}
+
+QSize QtAngleDisplayPresenter::currentTargetSize() const
+{
+    return m_targetSizeProvider ? m_targetSizeProvider() : QSize();
+}
+
+void QtAngleDisplayPresenter::requestPresentUpdate()
+{
+    if (m_requestPresent) {
+        m_requestPresent();
+    }
 }
 
 bool QtAngleDisplayPresenter::createProgram(QString *error)
@@ -399,7 +405,7 @@ bool QtAngleDisplayPresenter::ensureDisplayTarget(const QSize &size, QString *er
     return true;
 }
 
-bool QtAngleDisplayPresenter::copyFrameToDisplayTexture(const PublishedFrame &frame, QString *error)
+bool QtAngleDisplayPresenter::copyFrameToDisplayTexture(const FrameTicket &frame, QString *error)
 {
     if (!ensureImportedSlot(frame.slotIndex, error)) {
         return false;
@@ -479,15 +485,15 @@ bool QtAngleDisplayPresenter::copyFrameToDisplayTexture(const PublishedFrame &fr
 
 bool QtAngleDisplayPresenter::ensureImportedSlot(int slotIndex, QString *error)
 {
-    if (!m_slotPool || !m_eglApi || slotIndex < 0 || slotIndex >= m_importedSlots.size()) {
+    if (!m_frameReader || !m_eglApi || slotIndex < 0 || slotIndex >= m_importedSlots.size()) {
         if (error) {
             *error = QStringLiteral("D3D11 import slot prerequisites are incomplete.");
         }
         return false;
     }
 
-    PublishedFrame slotFrame;
-    if (!m_slotPool->querySlot(slotIndex, &slotFrame)) {
+    FrameSlotInfo slotInfo;
+    if (!m_frameReader->querySlot(slotIndex, &slotInfo)) {
         if (error) {
             *error = QStringLiteral("D3D11 import slot %1 is unavailable.").arg(slotIndex);
         }
@@ -496,16 +502,16 @@ bool QtAngleDisplayPresenter::ensureImportedSlot(int slotIndex, QString *error)
 
     ImportedSlot &slot = m_importedSlots[slotIndex];
     if (slot.surface != EGL_NO_SURFACE
-        && slot.generation == slotFrame.generation
-        && slot.sharedHandle == slotFrame.sharedHandle) {
+        && slot.generation == slotInfo.generation
+        && slot.sharedHandle == slotInfo.sharedHandle) {
         return true;
     }
 
     destroyImportedSlot(slotIndex);
 
     const EGLint surfaceAttributes[] = {
-        EGL_WIDTH, slotFrame.size.width(),
-        EGL_HEIGHT, slotFrame.size.height(),
+        EGL_WIDTH, slotInfo.size.width(),
+        EGL_HEIGHT, slotInfo.size.height(),
         EGL_TEXTURE_FORMAT, EGL_TEXTURE_RGBA,
         EGL_TEXTURE_TARGET, EGL_TEXTURE_2D,
         EGL_NONE
@@ -514,7 +520,7 @@ bool QtAngleDisplayPresenter::ensureImportedSlot(int slotIndex, QString *error)
     slot.surface = m_eglApi->createPbufferFromClientBuffer(
         m_eglDisplay,
         EGL_D3D_TEXTURE_2D_SHARE_HANDLE_ANGLE,
-        reinterpret_cast<EGLClientBuffer>(slotFrame.sharedHandle),
+        reinterpret_cast<EGLClientBuffer>(slotInfo.sharedHandle),
         m_eglConfig,
         surfaceAttributes);
     if (slot.surface == EGL_NO_SURFACE) {
@@ -549,9 +555,9 @@ bool QtAngleDisplayPresenter::ensureImportedSlot(int slotIndex, QString *error)
     m_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     m_gl->glBindTexture(GL_TEXTURE_2D, 0);
 
-    slot.generation = slotFrame.generation;
-    slot.sharedHandle = slotFrame.sharedHandle;
-    slot.size = slotFrame.size;
+    slot.generation = slotInfo.generation;
+    slot.sharedHandle = slotInfo.sharedHandle;
+    slot.size = slotInfo.size;
     return true;
 }
 

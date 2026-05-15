@@ -39,6 +39,9 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
+Makefile.Debug
+Makefile.Release
+.qmake.stash
 *.vcxproj*
 *.sln
 *.ninja

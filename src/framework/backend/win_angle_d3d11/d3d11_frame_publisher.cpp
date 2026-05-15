@@ -130,7 +130,7 @@ struct D3D11FramePublisher::Impl final
     };
 
     AngleStandaloneRuntime *runtime = nullptr;
-    ISharedFrameSlotPool *slotPool = nullptr;
+    IFrameWriter *frameWriter = nullptr;
     QVector<SlotResources> slotResources;
     QVector<ImportedSlot> importedSlots;
     GLuint publishFramebufferId = 0;
@@ -147,15 +147,15 @@ struct D3D11FramePublisher::Impl final
     QByteArray uploadBytes;
 
     bool initialize(AngleStandaloneRuntime *standaloneRuntime,
-                    ISharedFrameSlotPool *slotPoolPtr,
+                    IFrameWriter *frameWriterPtr,
                     QString *error)
     {
         runtime = standaloneRuntime;
-        slotPool = slotPoolPtr;
+        frameWriter = frameWriterPtr;
 
-        if (runtime == nullptr || slotPool == nullptr) {
+        if (runtime == nullptr || frameWriter == nullptr) {
             if (error) {
-                *error = QStringLiteral("The standalone publish bridge requires both a runtime and a slot pool.");
+                *error = QStringLiteral("The standalone publish bridge requires both a runtime and a frame writer.");
             }
             return false;
         }
@@ -229,8 +229,8 @@ void main()
             return false;
         }
 
-        slotResources.resize(slotPool->slotCount());
-        importedSlots.resize(slotPool->slotCount());
+        slotResources.resize(frameWriter->slotCount());
+        importedSlots.resize(frameWriter->slotCount());
         const bool angleImportEntryPoints = runtime->procTable().supportsAngleD3DTextureImport();
         const bool hasDisplay = runtime->eglDisplay() != EGL_NO_DISPLAY;
         const bool hasConfig = runtime->eglConfig() != nullptr;
@@ -266,7 +266,7 @@ void main()
                        int slotIndex,
                        QString *error)
     {
-        if (runtime == nullptr || slotPool == nullptr) {
+        if (runtime == nullptr || frameWriter == nullptr) {
             if (error) {
                 *error = QStringLiteral("The standalone publish bridge is not initialized.");
             }
@@ -412,7 +412,7 @@ void main()
         slot.sharedHandle = quintptr(sharedHandle);
         slot.size = size;
         ++slot.generation;
-        slotPool->updateSlot(slotIndex, slot.sharedHandle, slot.size, slot.generation);
+        frameWriter->updateSlot(slotIndex, slot.sharedHandle, slot.size, slot.generation);
         destroyImportedSlot(slotIndex);
         return true;
     }
@@ -432,8 +432,8 @@ void main()
             return false;
         }
 
-        PublishedFrame frame;
-        if (!slotPool->querySlot(slotIndex, &frame)) {
+        FrameSlotInfo slotInfo;
+        if (!frameWriter->querySlot(slotIndex, &slotInfo)) {
             if (error) {
                 *error = QStringLiteral("The standalone publish bridge import slot %1 is unavailable.").arg(slotIndex);
             }
@@ -442,8 +442,8 @@ void main()
 
         ImportedSlot &slot = importedSlots[slotIndex];
         if (slot.surface != EGL_NO_SURFACE
-            && slot.sharedHandle == frame.sharedHandle
-            && slot.generation == frame.generation
+            && slot.sharedHandle == slotInfo.sharedHandle
+            && slot.generation == slotInfo.generation
             && slot.size == size) {
             return true;
         }
@@ -461,7 +461,7 @@ void main()
         const Gles2ProcTable &gl = runtime->procTable();
         slot.surface = gl.eglCreatePbufferFromClientBuffer(runtime->eglDisplay(),
                                                            EGL_D3D_TEXTURE_2D_SHARE_HANDLE_ANGLE,
-                                                           reinterpret_cast<EGLClientBuffer>(frame.sharedHandle),
+                                                           reinterpret_cast<EGLClientBuffer>(slotInfo.sharedHandle),
                                                            runtime->eglConfig(),
                                                            surfaceAttributes);
         if (slot.surface == EGL_NO_SURFACE) {
@@ -496,8 +496,8 @@ void main()
         gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         gl.glBindTexture(GL_TEXTURE_2D, 0);
 
-        slot.sharedHandle = frame.sharedHandle;
-        slot.generation = frame.generation;
+        slot.sharedHandle = slotInfo.sharedHandle;
+        slot.generation = slotInfo.generation;
         slot.size = size;
         return true;
     }
@@ -786,7 +786,9 @@ bool D3D11FramePublisher::publishToSlot(GLuint sourceTextureId,
     return m_impl->publishToSlot(sourceTextureId, sourceSize, slotIndex, error);
 }
 
-bool D3D11FramePublisher::initialize(IWorkRuntime &runtime, QString *error)
+bool D3D11FramePublisher::initialize(IWorkRuntime &runtime,
+                                     IFrameWriter &frameWriter,
+                                     QString *error)
 {
     auto *standaloneRuntime = dynamic_cast<AngleStandaloneRuntime *>(&runtime);
     if (standaloneRuntime == nullptr) {
@@ -795,68 +797,55 @@ bool D3D11FramePublisher::initialize(IWorkRuntime &runtime, QString *error)
         }
         return false;
     }
-    if (m_slotPool == nullptr) {
-        if (error) {
-            *error = QStringLiteral("D3D11FramePublisher requires a configured shared slot pool.");
-        }
-        return false;
-    }
-
     m_runtime = standaloneRuntime;
-    return m_impl->initialize(standaloneRuntime, m_slotPool, error);
+    m_frameWriter = &frameWriter;
+    return m_impl->initialize(standaloneRuntime, m_frameWriter, error);
 }
 
 bool D3D11FramePublisher::publish(const WorkEnvelope &work,
-                                  const ArtifactSnapshot &artifact,
-                                  PublicationTicket *ticket,
+                                  const GpuTextureResult &gpuResult,
+                                  FrameTicket *ticket,
                                   QString *error)
 {
-    if (m_runtime == nullptr || m_slotPool == nullptr) {
+    if (m_runtime == nullptr || m_frameWriter == nullptr) {
         if (error) {
             *error = QStringLiteral("D3D11FramePublisher is not initialized.");
         }
         return false;
     }
-    if (artifact.textureId == 0U || !artifact.descriptor.logicalSize.isValid()) {
+    if (gpuResult.textureId == 0U || !gpuResult.size.isValid()) {
         if (error) {
-            *error = QStringLiteral("D3D11FramePublisher only supports texture artifacts.");
+            *error = QStringLiteral("D3D11FramePublisher only supports valid GPU texture results.");
         }
         return false;
     }
 
     int renderSlot = -1;
-    if (!m_slotPool->tryAcquireRenderSlot(&renderSlot)) {
+    if (!m_frameWriter->tryAcquireRenderSlot(&renderSlot)) {
         if (error) {
             error->clear();
         }
         return false;
     }
 
-    const bool publishOk = publishToSlot(artifact.textureId, artifact.descriptor.logicalSize, renderSlot, error);
+    const bool publishOk = publishToSlot(gpuResult.textureId, gpuResult.size, renderSlot, error);
     if (!publishOk) {
-        m_slotPool->abandonRenderSlot(renderSlot);
+        m_frameWriter->abandonRenderSlot(renderSlot);
         return false;
     }
 
-    PublishedFrame frame;
-    if (!m_slotPool->submitRenderedFrame(renderSlot, ++m_publicationCounter, &frame)) {
-        m_slotPool->abandonRenderSlot(renderSlot);
+    FrameTicket publishedTicket;
+    if (!m_frameWriter->submitRenderedFrame(renderSlot, ++m_publicationCounter, &publishedTicket)) {
+        m_frameWriter->abandonRenderSlot(renderSlot);
         if (error) {
             *error = QStringLiteral("Failed to submit the published frame into the shared slot pool.");
         }
         return false;
     }
 
+    Q_UNUSED(work);
     if (ticket != nullptr) {
-        ticket->publicationId = m_publicationCounter;
-        ticket->workId = work.workId;
-        ticket->streamKey = work.streamKey;
-        ticket->artifact = artifact.descriptor;
-        ticket->transportMetadata.insert(QStringLiteral("slotIndex"), frame.slotIndex);
-        ticket->transportMetadata.insert(QStringLiteral("generation"), qulonglong(frame.generation));
-        ticket->transportMetadata.insert(QStringLiteral("frameIndex"), qulonglong(frame.frameIndex));
-        ticket->transportMetadata.insert(QStringLiteral("sharedHandle"), qulonglong(frame.sharedHandle));
-        ticket->transportMetadata.insert(QStringLiteral("size"), frame.size);
+        *ticket = publishedTicket;
     }
 
     return true;
@@ -866,13 +855,8 @@ void D3D11FramePublisher::shutdown()
 {
     releaseGlResources();
     m_runtime = nullptr;
-    m_slotPool = nullptr;
+    m_frameWriter = nullptr;
     m_publicationCounter = 0;
-}
-
-void D3D11FramePublisher::setSlotPool(ISharedFrameSlotPool *slotPool)
-{
-    m_slotPool = slotPool;
 }
 
 void D3D11FramePublisher::releaseGlResources()

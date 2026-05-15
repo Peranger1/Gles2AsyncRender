@@ -2,6 +2,7 @@
 
 #include <QImage>
 #include <QMap>
+#include <QMetaType>
 #include <QSize>
 #include <QString>
 #include <QVariant>
@@ -10,20 +11,25 @@
 #include <QtANGLE/GLES2/gl2.h>
 
 #include <memory>
+#include <variant>
 
-enum class WorkPriority
+using RequestId = quint64;
+using RequestVersion = quint64;
+using LaneId = QString;
+using MergeKey = QString;
+
+enum class RequestPriority
 {
     Low,
     Normal,
     High
 };
 
-enum class CoalescingPolicy
+enum class ResultDeliveryPolicy
 {
-    KeepAll,
-    ReplaceByKey,
-    DropIfBusy,
-    LatestOnly
+    AlwaysDeliver,
+    DeliverOnlyIfLatest,
+    DeliverOnlyIfNoPending
 };
 
 enum class WorkState
@@ -31,63 +37,105 @@ enum class WorkState
     Queued,
     Admitted,
     Executing,
-    ProducingArtifact,
+    ProducingOutput,
     Publishing,
     Published,
     Cancelled,
     Failed
 };
 
-struct WorkEnvelope final
+class IWorkPayload
 {
-    quint64 workId = 0;
-    QString streamKey;
-    QString workflowKey;
-    WorkPriority priority = WorkPriority::Normal;
-    CoalescingPolicy coalescing = CoalescingPolicy::ReplaceByKey;
-    QMap<QString, QVariant> hints;
-    std::shared_ptr<void> payload;
+public:
+    virtual ~IWorkPayload() = default;
 };
 
-struct ArtifactDescriptor final
+class ICustomResult
 {
-    quint64 artifactId = 0;
-    QString artifactKey;
-    QString kind;
-    QSize logicalSize;
-    QMap<QString, QVariant> metadata;
+public:
+    virtual ~ICustomResult() = default;
 };
 
-struct PublicationTicket final
+struct RequestHints final
 {
-    quint64 publicationId = 0;
-    quint64 workId = 0;
-    QString streamKey;
-    ArtifactDescriptor artifact;
-    QMap<QString, QVariant> transportMetadata;
+    RequestPriority priority = RequestPriority::Normal;
+    ResultDeliveryPolicy deliveryPolicy = ResultDeliveryPolicy::DeliverOnlyIfLatest;
 };
 
-struct TextureArtifact final
+struct RequestEnvelope final
 {
-    GLuint textureId = 0U;
-    QSize size;
-    QMap<QString, QVariant> metadata;
+    RequestId requestId = 0;
+    RequestVersion version = 0;
+    LaneId laneId;
+    MergeKey mergeKey;
+    QString requestKind;
+    RequestHints hints;
+    std::shared_ptr<IWorkPayload> payload;
 };
 
-struct ArtifactSnapshot final
+using WorkEnvelope = RequestEnvelope;
+
+struct LaneSnapshot final
 {
-    ArtifactDescriptor descriptor;
-    GLuint textureId = 0U;
-    quintptr sharedHandle = 0U;
-    QImage cpuBitmap;
-    std::shared_ptr<void> customObject;
+    bool hasActive = false;
+    bool hasPending = false;
+    bool hasPublicationPending = false;
+    bool isPublishing = false;
+    WorkEnvelope active;
+    WorkEnvelope pending;
+    WorkEnvelope publication;
 };
 
-struct PublishedFrame final
+struct FrameTicket final
 {
     int slotIndex = -1;
-    quintptr sharedHandle = 0;
-    QSize size;
     quint64 generation = 0;
     quint64 frameIndex = 0;
+    QSize size;
 };
+
+struct GpuTextureResult final
+{
+    GLuint textureId = 0U;
+    QSize size;
+    QMap<QString, QVariant> metadata;
+};
+
+struct CpuImageResult final
+{
+    QImage image;
+    QMap<QString, QVariant> metadata;
+};
+
+using ProcessorOutputPayload = std::variant<GpuTextureResult,
+                                            CpuImageResult,
+                                            std::shared_ptr<ICustomResult>>;
+
+struct ProcessorOutput final
+{
+    RequestId requestId = 0;
+    QString outputKind;
+    ProcessorOutputPayload payload;
+};
+
+using JobResultPayload = std::variant<FrameTicket,
+                                      CpuImageResult,
+                                      std::shared_ptr<ICustomResult>>;
+
+struct JobResult final
+{
+    RequestId requestId = 0;
+    QString resultKind;
+    JobResultPayload payload;
+};
+
+struct FrameSlotInfo final
+{
+    quintptr sharedHandle = 0U;
+    QSize size;
+    quint64 generation = 0;
+};
+
+Q_DECLARE_METATYPE(FrameTicket)
+Q_DECLARE_METATYPE(JobResult)
+Q_DECLARE_METATYPE(WorkState)
