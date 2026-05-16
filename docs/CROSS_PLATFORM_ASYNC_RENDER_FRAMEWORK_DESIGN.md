@@ -5,6 +5,16 @@
 > 状态：Proposed
 >
 > 本文档将当前 Windows 已验证实现、未来 macOS 接入方案，以及框架重构方向整理为一份完整设计。后续重构应优先以本文档为主参考。
+>
+> 补充说明：
+>
+> - 本文档保留了较多“重构前总体设计”表述，适合作为架构思路文档阅读
+> - 当前代码已经进一步收敛为 `framework/platform + framework/execution + app` 三层结构
+> - 当前实现状态请优先参考：
+>   - [ARCHITECTURE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/ARCHITECTURE.md)
+>   - [docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md)
+>
+> 因此，本文中关于 `framework/core`、`framework/qt`、`FrameTicket`、`SerialConflatedLane` 等章节，应理解为“上一轮总体方案讨论”，不等同于当前代码的最终目录与命名。
 
 ## 1. 背景
 

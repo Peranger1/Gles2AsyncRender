@@ -538,7 +538,7 @@ bool photo_editor_render(void *handle, GLuint *textureId, QSize *size, QString *
         1.0f, 0.0f
     };
 
-    QThread::currentThread()->msleep(150);
+    // QThread::currentThread()->msleep(150);
 
     const QSize targetSize = state->outputTextureSize;
     const QImage sourceImage = state->sourceImage;

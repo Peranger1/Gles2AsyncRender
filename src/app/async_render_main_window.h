@@ -9,9 +9,9 @@
 #include <memory>
 
 class QAction;
-class IPlatformRenderBackend;
-class QOpenGLWidgetFrameView;
-class PhotoEditorAsyncRenderFacade;
+class IPlatformBackend;
+class TexturePresentWidget;
+class PhotoEditorAppSession;
 class QLabel;
 class QDockWidget;
 class QPushButton;
@@ -54,9 +54,9 @@ private:
     void pushEffectParameters();
     void requestRender();
 
-    QOpenGLWidgetFrameView *m_displayWidget = nullptr;
-    std::unique_ptr<IPlatformRenderBackend> m_renderBackend;
-    PhotoEditorAsyncRenderFacade *m_worker = nullptr;
+    TexturePresentWidget *m_displayWidget = nullptr;
+    std::unique_ptr<IPlatformBackend> m_renderBackend;
+    PhotoEditorAppSession *m_worker = nullptr;
     QThread m_workerThread;
 
     QAction *m_openDirectoryAction = nullptr;

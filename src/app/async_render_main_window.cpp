@@ -1,9 +1,9 @@
 #include "async_render_main_window.h"
 
-#include "app/photo_editor_async_render_facade.h"
-#include "framework/backend/platform_render_backend.h"
-#include "framework/backend/render_backend_factory.h"
-#include "framework/qt/qopenglwidget_frame_view.h"
+#include "app/photo_editor_app_session.h"
+#include "app/texture_present_widget.h"
+#include "framework/platform/platform_backend.h"
+#include "framework/platform/win_angle_d3d11/win_angle_platform_backend.h"
 #include "runtime_diagnostics.h"
 
 #include <QAction>
@@ -26,8 +26,6 @@
 #include <QWidget>
 #include <QtMath>
 
-#include <variant>
-
 namespace
 {
 void logWindowMessage(const QString &message)
@@ -43,58 +41,45 @@ void logWindowDiag(const QString &message)
 
 AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     : QMainWindow(parent)
-    , m_displayWidget(new QOpenGLWidgetFrameView(this))
-    , m_renderBackend(createDefaultRenderBackend())
-    , m_worker(new PhotoEditorAsyncRenderFacade())
+    , m_displayWidget(new TexturePresentWidget(this))
+    , m_renderBackend(std::make_unique<WinAnglePlatformBackend>(3))
+    , m_worker(new PhotoEditorAppSession())
 {
     setWindowTitle(QStringLiteral("Gles2AsyncRender"));
     resize(1280, 760);
 
     if (m_renderBackend) {
-        m_displayWidget->setFrameReader(m_renderBackend->sharedFrameReader());
-        m_displayWidget->setPresenter(m_renderBackend->createPresenter());
+        m_displayWidget->setReader(m_renderBackend->reader());
     }
     setCentralWidget(m_displayWidget);
 
-    m_workerThread.setObjectName(QStringLiteral("PhotoEditorAsyncRenderFacadeThread"));
+    m_workerThread.setObjectName(QStringLiteral("PhotoEditorAppSessionThread"));
     m_worker->moveToThread(&m_workerThread);
     connect(&m_workerThread, &QThread::finished, m_worker, &QObject::deleteLater);
 
-    connect(m_displayWidget, &QOpenGLWidgetFrameView::glInitialized,
-            this, &AsyncRenderMainWindow::onDisplayGlInitialized,
-            Qt::QueuedConnection);
-    connect(m_displayWidget, &QOpenGLWidgetFrameView::displayReadyForWorker,
+    connect(m_displayWidget, &TexturePresentWidget::displayReady,
             this, &AsyncRenderMainWindow::onDisplayReadyForWorker,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &QOpenGLWidgetFrameView::publicationCapacityAvailable,
-            m_worker, &PhotoEditorAsyncRenderFacade::onPublicationCapacityAvailable,
+    connect(m_displayWidget, &TexturePresentWidget::outputSizeChanged,
+            m_worker, &PhotoEditorAppSession::setOutputSize,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &QOpenGLWidgetFrameView::outputSizeChanged,
-            m_worker, &PhotoEditorAsyncRenderFacade::setOutputSize,
+    connect(m_displayWidget, &TexturePresentWidget::textureConsumed,
+            m_worker, &PhotoEditorAppSession::onTextureConsumed,
             Qt::QueuedConnection);
 
-    connect(m_worker, &PhotoEditorAsyncRenderFacade::frameReady,
-            m_displayWidget, &QOpenGLWidgetFrameView::onFrameReady,
+    connect(m_worker, &PhotoEditorAppSession::textureReady,
+            m_displayWidget, &TexturePresentWidget::onTextureReady,
             Qt::QueuedConnection);
-    connect(m_worker, &PhotoEditorAsyncRenderFacade::initializationFailed,
+    connect(m_worker, &PhotoEditorAppSession::initializationFailed,
             this, &AsyncRenderMainWindow::onWorkerError,
             Qt::QueuedConnection);
-    connect(m_worker, &PhotoEditorAsyncRenderFacade::imageDirectoryLoadFinished,
+    connect(m_worker, &PhotoEditorAppSession::imageDirectoryLoadFinished,
             this, &AsyncRenderMainWindow::onImageDirectoryLoadFinished,
             Qt::QueuedConnection);
-    connect(m_worker, &PhotoEditorAsyncRenderFacade::imageSelectionChanged,
+    connect(m_worker, &PhotoEditorAppSession::imageSelectionChanged,
             this, &AsyncRenderMainWindow::onImageSelectionChanged,
             Qt::QueuedConnection);
-    connect(m_worker, &PhotoEditorAsyncRenderFacade::jobResultReady,
-            this, [this](const JobResult &result) {
-                if (!std::holds_alternative<FrameTicket>(result.payload)) {
-                    logWindowMessage(QStringLiteral("Received non-frame job result. kind=%1 requestId=%2")
-                                         .arg(result.resultKind)
-                                         .arg(result.requestId));
-                }
-            },
-            Qt::QueuedConnection);
-    connect(m_worker, &PhotoEditorAsyncRenderFacade::cpuPreviewReady,
+    connect(m_worker, &PhotoEditorAppSession::cpuPreviewReady,
             this, &AsyncRenderMainWindow::showCpuPreviewDialog,
             Qt::QueuedConnection);
 
@@ -119,13 +104,17 @@ AsyncRenderMainWindow::~AsyncRenderMainWindow()
         logWindowDiag(QStringLiteral("Worker thread stopped."));
     }
 
+    if (m_displayWidget != nullptr) {
+        m_displayWidget->shutdown();
+    }
+    m_renderBackend.reset();
     m_worker = nullptr;
     logWindowDiag(QStringLiteral("Destructor end"));
 }
 
 void AsyncRenderMainWindow::onDisplayGlInitialized()
 {
-    logWindowMessage(QStringLiteral("Display widget is ready. Waiting for the first frame swap before starting the render worker."));
+    logWindowMessage(QStringLiteral("Display widget GL initialization completed."));
 }
 
 void AsyncRenderMainWindow::onDisplayReadyForWorker()
@@ -142,7 +131,7 @@ void AsyncRenderMainWindow::onDisplayReadyForWorker()
         "initialize",
         Qt::BlockingQueuedConnection,
         Q_RETURN_ARG(bool, initialized),
-        Q_ARG(IPlatformRenderBackend *, m_renderBackend.get()),
+        Q_ARG(IPlatformBackend *, m_renderBackend.get()),
         Q_ARG(QSize, m_displayWidget->outputPixelSize()));
     initialized = invoked && initialized;
     if (!initialized) {
