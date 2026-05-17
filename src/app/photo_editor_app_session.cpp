@@ -1,11 +1,11 @@
 #include "photo_editor_app_session.h"
 
-#include "framework/execution/request_channel.h"
+#include "framework/execution/execution_types.h"
 #include "framework/platform/platform_backend.h"
 #include "framework/platform/runtime.h"
 #include "framework/platform/writer.h"
-#include "photo_editor_demo_handlers.h"
-#include "photo_editor_demo_requests.h"
+#include "photo_editor/photo_editor_cpu_renderer.h"
+#include "photo_editor/photo_editor_runtime_host.h"
 #include "runtime_diagnostics.h"
 
 #include <QDir>
@@ -13,9 +13,6 @@
 
 namespace
 {
-constexpr const char *kGpuPreviewTypeId = "photo_editor.preview.gpu.async";
-constexpr const char *kCpuPreviewTypeId = "photo_editor.preview.cpu.sync";
-
 void logSessionMessage(const QString &message)
 {
     RuntimeDiagnostics::logInfo("[PhotoEditorAppSession]", message);
@@ -129,34 +126,42 @@ bool PhotoEditorAppSession::initialize(IPlatformBackend *backend, QSize outputSi
         return false;
     }
 
-    QString error;
     std::unique_ptr<IRuntime> runtime = backend->createRuntime();
-    if (!runtime || !runtime->initialize(&error)) {
+    auto runtimeHost = std::make_unique<PhotoEditorRuntimeHost>(std::move(runtime));
+    QString error;
+    if (!runtimeHost->start(&error)) {
         emit initializationFailed(error.isEmpty()
                                       ? QStringLiteral("Failed to initialize the platform runtime.")
                                       : error);
         return false;
     }
 
-    auto dispatcher = std::make_unique<RequestDispatcher>();
-    dispatcher->registerChannel(std::make_unique<RequestChannel>(
-        runtime.get(),
-        std::make_unique<PhotoEditorGpuPreviewHandler>(),
-        this));
-    dispatcher->registerChannel(std::make_unique<RequestChannel>(
-        nullptr,
-        std::make_unique<PhotoEditorCpuPreviewHandler>(),
-        this));
+    auto invoker = std::make_unique<RuntimeInvoker>(runtimeHost.get());
+    auto gpuSession = std::make_unique<PhotoEditorGpuSession>();
+    auto previewLane = std::make_unique<AsyncLane<PhotoEditorGpuPreviewArgs, RawGpuTextureResult>>(
+        runtimeHost.get(),
+        LaneConfig { QStringLiteral("photo_editor.preview.gpu"),
+                     QueuePolicyKind::MergeWhileBusy,
+                     DeliveryPolicyKind::DeliverEveryStartedResult,
+                     1 },
+        [this, gpuSessionPtr = gpuSession.get()](const TaskContext &context,
+                                                 const PhotoEditorGpuPreviewArgs &args,
+                                                 AsyncLane<PhotoEditorGpuPreviewArgs, RawGpuTextureResult>::Done done) {
+            gpuSessionPtr->renderPreviewAsync(context, args, std::move(done));
+        },
+        std::make_shared<PhotoEditorGpuPreviewArgsMerger>());
 
     m_backend = backend;
-    m_runtime = std::move(runtime);
-    m_dispatcher = std::move(dispatcher);
+    m_runtimeHost = std::move(runtimeHost);
+    m_invoker = std::move(invoker);
+    m_gpuSession = std::move(gpuSession);
+    m_gpuPreviewLane = std::move(previewLane);
     m_outputSize = sanitizedSize(outputSize);
-    m_requestSequence = 0;
     m_initialized = true;
     m_shuttingDown = false;
     m_hasPendingGpuPublish = false;
-    logSessionMessage(QStringLiteral("Initialized. App session now owns the request dispatcher and the runtime."));
+    m_pendingGpuRuntime = nullptr;
+    logSessionMessage(QStringLiteral("Initialized. App session now owns the runtime host and preview lane."));
     return true;
 }
 
@@ -173,7 +178,7 @@ void PhotoEditorAppSession::setOutputSize(QSize size)
 
     m_outputSize = safeSize;
     if (m_initialized && m_catalog->hasImage()) {
-        submitGpuRequest();
+        submitGpuPreview();
     }
 }
 
@@ -212,7 +217,7 @@ void PhotoEditorAppSession::loadImageDirectory(const QString &directoryPath)
                                     currentDisplayName(m_catalog->imagePaths, m_catalog->currentImageIndex),
                                     m_catalog->currentImage.size());
     emitImageSelection();
-    submitGpuRequest();
+    submitGpuPreview();
 }
 
 void PhotoEditorAppSession::selectNextImage()
@@ -224,13 +229,13 @@ void PhotoEditorAppSession::selectNextImage()
     QString error;
     if (!m_catalog->selectRelativeImage(1, &error)) {
         if (!error.isEmpty()) {
-            emit initializationFailed(error);
+            emit requestWarning(error);
         }
         return;
     }
 
     emitImageSelection();
-    submitGpuRequest();
+    submitGpuPreview();
 }
 
 void PhotoEditorAppSession::selectPreviousImage()
@@ -242,26 +247,26 @@ void PhotoEditorAppSession::selectPreviousImage()
     QString error;
     if (!m_catalog->selectRelativeImage(-1, &error)) {
         if (!error.isEmpty()) {
-            emit initializationFailed(error);
+            emit requestWarning(error);
         }
         return;
     }
 
     emitImageSelection();
-    submitGpuRequest();
+    submitGpuPreview();
 }
 
 void PhotoEditorAppSession::requestRender()
 {
     if (m_initialized && !m_shuttingDown && m_catalog->hasImage()) {
-        submitGpuRequest();
+        submitGpuPreview();
     }
 }
 
 void PhotoEditorAppSession::requestCpuPreview()
 {
     if (m_initialized && !m_shuttingDown && m_catalog->hasImage()) {
-        submitCpuRequest();
+        runCpuPreviewSync();
     }
 }
 
@@ -271,9 +276,10 @@ void PhotoEditorAppSession::onTextureConsumed()
         return;
     }
 
-    if (tryPublishGpuResult(m_pendingGpuPublish, m_runtime.get()) == GpuPublishDisposition::Published) {
+    if (tryPublishGpuResult(m_pendingGpuPublish, m_pendingGpuRuntime) == GpuPublishDisposition::Published) {
         m_hasPendingGpuPublish = false;
         m_pendingGpuPublish = {};
+        m_pendingGpuRuntime = nullptr;
     }
 }
 
@@ -287,53 +293,71 @@ void PhotoEditorAppSession::shutdown()
     m_initialized = false;
     m_hasPendingGpuPublish = false;
     m_pendingGpuPublish = {};
+    m_pendingGpuRuntime = nullptr;
 
-    if (m_dispatcher) {
-        m_dispatcher->shutdown();
+    if (m_gpuPreviewLane) {
+        m_gpuPreviewLane->shutdown();
+    }
+    if (m_gpuSession && m_runtimeHost) {
+        m_invoker->invokeSync<void>([this](IRuntime *runtime) {
+            m_gpuSession->shutdown(runtime);
+            return ExecutionOutcome<void>::success();
+        });
     }
     if (m_backend && m_backend->writer()) {
         m_backend->writer()->reset();
     }
-    if (m_runtime) {
-        m_runtime->shutdown();
+    if (m_runtimeHost) {
+        m_runtimeHost->shutdown();
     }
 
-    m_dispatcher.reset();
-    m_runtime.reset();
+    m_gpuPreviewLane.reset();
+    m_gpuSession.reset();
+    m_invoker.reset();
+    m_runtimeHost.reset();
     m_backend = nullptr;
     m_catalog = std::make_unique<ImageCatalogState>();
-    m_requestSequence = 0;
 }
 
-void PhotoEditorAppSession::onResultReady(const ExecutionResult &result, IExecutionContext &context)
+bool PhotoEditorAppSession::PhotoEditorGpuPreviewArgsMerger::canMerge(const PhotoEditorGpuPreviewArgs &waiting,
+                                                                      const PhotoEditorGpuPreviewArgs &incoming) const
 {
-    if (m_shuttingDown || m_backend == nullptr) {
-        return;
-    }
-
-    if (std::holds_alternative<RawGpuTextureResult>(result.payload)) {
-        const RawGpuTextureResult &gpuResult = std::get<RawGpuTextureResult>(result.payload);
-        const GpuPublishDisposition disposition = tryPublishGpuResult(gpuResult, context.runtime());
-        if (disposition == GpuPublishDisposition::RetryLater) {
-            m_pendingGpuPublish = gpuResult;
-            m_hasPendingGpuPublish = true;
-        }
-        return;
-    }
-
-    if (std::holds_alternative<CpuImageResult>(result.payload)) {
-        const CpuImageResult &previewResult = std::get<CpuImageResult>(result.payload);
-        const QString description = previewResult.metadata.value(QStringLiteral("description")).toString();
-        emit cpuPreviewReady(previewResult.image, description);
-    }
+    return waiting.source.sourceKey == incoming.source.sourceKey;
 }
 
-void PhotoEditorAppSession::onRequestFailed(RequestId requestId, const QString &error)
+PhotoEditorGpuPreviewArgs PhotoEditorAppSession::PhotoEditorGpuPreviewArgsMerger::merge(
+    const PhotoEditorGpuPreviewArgs &waiting,
+    const PhotoEditorGpuPreviewArgs &incoming) const
 {
-    Q_UNUSED(requestId);
-    if (!m_shuttingDown && !error.isEmpty()) {
-        emit initializationFailed(error);
-    }
+    Q_UNUSED(waiting);
+    return incoming;
+}
+
+PhotoEditorSourceSnapshot PhotoEditorAppSession::currentSourceSnapshot() const
+{
+    PhotoEditorSourceSnapshot snapshot;
+    snapshot.sourceKey = m_catalog->currentImagePath;
+    snapshot.sourceImageCacheKey = m_catalog->currentImage.cacheKey();
+    snapshot.sourceImage = m_catalog->currentImage;
+    return snapshot;
+}
+
+PhotoEditorGpuPreviewArgs PhotoEditorAppSession::buildGpuPreviewArgs() const
+{
+    PhotoEditorGpuPreviewArgs args;
+    args.source = currentSourceSnapshot();
+    args.parameters = m_effectParameters;
+    args.outputSize = m_outputSize;
+    return args;
+}
+
+PhotoEditorCpuPreviewArgs PhotoEditorAppSession::buildCpuPreviewArgs() const
+{
+    PhotoEditorCpuPreviewArgs args;
+    args.source = currentSourceSnapshot();
+    args.parameters = m_effectParameters;
+    args.previewSize = m_outputSize.boundedTo(QSize(320, 320));
+    return args;
 }
 
 void PhotoEditorAppSession::emitImageSelection()
@@ -349,34 +373,79 @@ void PhotoEditorAppSession::emitImageSelection()
                                m_catalog->currentImage.size());
 }
 
-void PhotoEditorAppSession::submitGpuRequest()
+void PhotoEditorAppSession::submitGpuPreview()
 {
-    if (m_dispatcher) {
-        m_dispatcher->submit(buildGpuRequest());
+    if (!m_gpuPreviewLane) {
+        return;
+    }
+
+    const SubmitResult submit = m_gpuPreviewLane->submit(
+        buildGpuPreviewArgs(),
+        [this](TaskId taskId, ExecutionOutcome<RawGpuTextureResult> outcome) {
+            handleGpuPreviewCompleted(taskId, std::move(outcome));
+        });
+    if (!submit.accepted && !submit.error.message.isEmpty()) {
+        emit requestWarning(submit.error.message);
     }
 }
 
-void PhotoEditorAppSession::submitCpuRequest()
+void PhotoEditorAppSession::runCpuPreviewSync()
 {
-    if (m_dispatcher) {
-        m_dispatcher->submit(buildCpuRequest());
+    if (!m_invoker) {
+        return;
+    }
+
+    const PhotoEditorCpuPreviewArgs args = buildCpuPreviewArgs();
+    const ExecutionOutcome<CpuImageResult> outcome = m_invoker->callDirect<CpuImageResult>([args]() {
+        return PhotoEditorCpuRenderer::renderPreview(args);
+    });
+    if (!outcome.ok()) {
+        emit requestWarning(outcome.error().message);
+        return;
+    }
+
+    const CpuImageResult &previewResult = outcome.value();
+    const QString description = previewResult.metadata.value(QStringLiteral("description")).toString();
+    emit cpuPreviewReady(previewResult.image, description);
+}
+
+void PhotoEditorAppSession::handleGpuPreviewCompleted(TaskId taskId,
+                                                      ExecutionOutcome<RawGpuTextureResult> outcome)
+{
+    Q_UNUSED(taskId);
+
+    if (m_shuttingDown || m_backend == nullptr || m_runtimeHost == nullptr) {
+        return;
+    }
+    if (!outcome.ok()) {
+        emit requestWarning(outcome.error().message);
+        return;
+    }
+
+    const RawGpuTextureResult &gpuResult = outcome.value();
+    const GpuPublishDisposition disposition = tryPublishGpuResult(gpuResult, m_runtimeHost->runtime());
+    if (disposition == GpuPublishDisposition::RetryLater) {
+        m_pendingGpuPublish = gpuResult;
+        m_pendingGpuRuntime = m_runtimeHost->runtime();
+        m_hasPendingGpuPublish = true;
     }
 }
 
-PhotoEditorAppSession::GpuPublishDisposition PhotoEditorAppSession::tryPublishGpuResult(const RawGpuTextureResult &gpuResult,
-                                                                                        IRuntime *sourceRuntime)
+PhotoEditorAppSession::GpuPublishDisposition PhotoEditorAppSession::tryPublishGpuResult(
+    const RawGpuTextureResult &gpuResult,
+    IRuntime *sourceRuntime)
 {
     if (m_backend == nullptr || m_backend->writer() == nullptr) {
         return GpuPublishDisposition::Failed;
     }
 
     if (sourceRuntime == nullptr) {
-        emit initializationFailed(QStringLiteral("The GPU result cannot be published because the execution context runtime is unavailable."));
+        emit requestWarning(QStringLiteral("The GPU result cannot be published because the execution context runtime is unavailable."));
         return GpuPublishDisposition::Failed;
     }
 
-    if (m_runtime && sourceRuntime != m_runtime.get()) {
-        emit initializationFailed(QStringLiteral("The GPU result runtime does not match the app session runtime."));
+    if (m_runtimeHost && sourceRuntime != m_runtimeHost->runtime()) {
+        emit requestWarning(QStringLiteral("The GPU result runtime does not match the app session runtime."));
         return GpuPublishDisposition::Failed;
     }
 
@@ -389,42 +458,8 @@ PhotoEditorAppSession::GpuPublishDisposition PhotoEditorAppSession::tryPublishGp
     }
 
     if (!error.isEmpty()) {
-        emit initializationFailed(error);
+        emit requestWarning(error);
         return GpuPublishDisposition::Failed;
     }
     return GpuPublishDisposition::RetryLater;
-}
-
-ExecutionRequest PhotoEditorAppSession::buildGpuRequest() const
-{
-    ExecutionRequest request;
-    request.requestId = ++const_cast<PhotoEditorAppSession *>(this)->m_requestSequence;
-    request.typeId = QString::fromLatin1(kGpuPreviewTypeId);
-    request.mergeKey = request.typeId;
-
-    auto payload = std::make_shared<PhotoEditorGpuPreviewPayload>();
-    payload->sourceKey = m_catalog->currentImagePath;
-    payload->sourceImageCacheKey = m_catalog->currentImage.cacheKey();
-    payload->sourceImage = m_catalog->currentImage;
-    payload->parameters = m_effectParameters;
-    payload->outputSize = m_outputSize;
-    request.payload = payload;
-    return request;
-}
-
-ExecutionRequest PhotoEditorAppSession::buildCpuRequest() const
-{
-    ExecutionRequest request;
-    request.requestId = ++const_cast<PhotoEditorAppSession *>(this)->m_requestSequence;
-    request.typeId = QString::fromLatin1(kCpuPreviewTypeId);
-    request.mergeKey = request.typeId;
-
-    auto payload = std::make_shared<PhotoEditorCpuPreviewPayload>();
-    payload->sourceKey = m_catalog->currentImagePath;
-    payload->sourceImageCacheKey = m_catalog->currentImage.cacheKey();
-    payload->sourceImage = m_catalog->currentImage;
-    payload->parameters = m_effectParameters;
-    payload->previewSize = m_outputSize.boundedTo(QSize(320, 320));
-    request.payload = payload;
-    return request;
 }

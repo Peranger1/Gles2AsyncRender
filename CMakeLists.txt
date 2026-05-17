@@ -15,13 +15,17 @@ find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 add_executable(Gles2AsyncRender
     src/app/photo_editor_app_session.cpp
     src/app/photo_editor_app_session.h
-    src/app/photo_editor_demo_handlers.cpp
-    src/app/photo_editor_demo_handlers.h
-    src/app/photo_editor_demo_requests.h
+    src/photo_editor/photo_editor_cpu_renderer.cpp
+    src/photo_editor/photo_editor_cpu_renderer.h
+    src/photo_editor/photo_editor_gpu_session.cpp
+    src/photo_editor/photo_editor_gpu_session.h
+    src/photo_editor/photo_editor_render_args.h
+    src/photo_editor/photo_editor_runtime_host.cpp
+    src/photo_editor/photo_editor_runtime_host.h
     src/app/texture_present_widget.cpp
     src/app/texture_present_widget.h
-    src/adapters/photo_editor/photo_editor_gles2_backend.cpp
-    src/adapters/photo_editor/photo_editor_gles2_backend.h
+    src/photo_editor/photo_editor_gles2_backend.cpp
+    src/photo_editor/photo_editor_gles2_backend.h
     src/angle_threading.cpp
     src/angle_threading.h
     src/app/async_render_main_window.cpp
@@ -32,18 +36,19 @@ add_executable(Gles2AsyncRender
     src/framework/backend/win_angle_d3d11/gles2_shader_utils.h
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h
+    src/framework/execution/async_lane.h
+    src/framework/execution/execution_common.h
     src/framework/execution/execution_context.h
     src/framework/execution/execution_types.h
     src/framework/execution/merge_while_busy_policy.h
-    src/framework/execution/request_channel.cpp
-    src/framework/execution/request_channel.h
-    src/framework/execution/request_dispatcher.cpp
-    src/framework/execution/request_dispatcher.h
-    src/framework/execution/request_handler.h
     src/framework/execution/request_merge_strategy.h
     src/framework/execution/request_queue_policy.h
-    src/framework/execution/request_result_sink.h
+    src/framework/execution/runtime_host.h
+    src/framework/execution/runtime_invoker.h
+    src/framework/execution/runtime_scope.cpp
+    src/framework/execution/runtime_scope.h
     src/framework/execution/serial_queue_policy.h
+    src/framework/execution/sync_lane.h
     src/framework/platform/platform_backend.h
     src/framework/platform/reader.h
     src/framework/platform/runtime.h

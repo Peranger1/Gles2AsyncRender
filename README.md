@@ -25,13 +25,15 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
   - 垂直翻转
 - CPU 同步预览检查
   - 对当前图片和当前参数生成一张 CPU 小预览图
-- 请求调度
+- 执行语义
   - GPU 预览使用 `MergeWhileBusy`
-  - CPU 预览使用 `SerialQueue`
+  - 已启动的 GPU 任务结果必须交付
+  - waiting 区域允许折叠
+  - CPU 预览直接同步执行，不进入 lane
 
 ## 当前架构
 
-当前代码已经收敛到三层主结构：
+当前代码已经收敛到四块主结构：
 
 - `framework/platform`
   - `IRuntime`
@@ -41,19 +43,28 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
   - Windows ANGLE D3D11 平台实现
 
 - `framework/execution`
-  - `RequestTypeDescriptor`
-  - `RequestChannel`
-  - `RequestDispatcher`
-  - `MergeWhileBusyPolicy`
-  - `SerialQueuePolicy`
+  - `ExecutionOutcome`
+  - `RuntimeHost`
+  - `RuntimeInvoker`
+  - `RuntimeScope`
+  - `AsyncLane`
+  - `SyncLane`
+  - `QueuePolicyKind`
+  - `DeliveryPolicyKind`
 
 - `app`
   - `TexturePresentWidget`
-  - `PhotoEditorDemo*`
   - `PhotoEditorAppSession`
   - `AsyncRenderMainWindow`
 
-当前实现不再保留旧的 `framework/core`、`framework/qt`、`AsyncTaskFacade`、`photo_editor_*_processor/session` 主链路。
+- `photo_editor`
+  - `PhotoEditorRuntimeHost`
+  - `PhotoEditorGpuSession`
+  - `PhotoEditorCpuRenderer`
+  - `photo_editor_render_args`
+  - `photo_editor_gles2_backend`
+
+当前实现不再保留旧的 `RequestDispatcher`、`RequestChannel`、`IRequestHandler`、`photo_editor_demo_handlers` 主链路。
 
 ## 关键文件
 
@@ -67,16 +78,29 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
 
 - [src/app/photo_editor_app_session.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_app_session.cpp)
   - 管理图片目录、当前图片、当前参数
-  - 持有 `RequestDispatcher`
-  - 在结果完成时调用 `IWriter`
+  - 持有 `PhotoEditorRuntimeHost`、`RuntimeInvoker`、`AsyncLane`
+  - 在 GPU 结果完成后调用 `IWriter`
 
-- [src/app/photo_editor_demo_handlers.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_demo_handlers.cpp)
-  - GPU 异步 preview handler
-  - CPU 同步 preview handler
+- [src/photo_editor/photo_editor_gpu_session.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_gpu_session.cpp)
+  - GPU runtime 亲和状态对象
+  - 管理 `photo_editor_*` 生命周期
+  - 发起异步 GPU 处理并收集 `RawGpuTextureResult`
 
-- [src/framework/execution/request_channel.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/request_channel.cpp)
-  - 单 request type 执行通道
-  - 根据 `RequestTypeDescriptor.queuePolicy` 创建 waiting policy
+- [src/photo_editor/photo_editor_cpu_renderer.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_cpu_renderer.cpp)
+  - CPU 同步预览生成
+
+- [src/photo_editor/photo_editor_runtime_host.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_runtime_host.cpp)
+  - 项目内 `RuntimeHost` 实现
+
+- [src/photo_editor/photo_editor_render_args.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_render_args.h)
+  - GPU/CPU 预览参数快照
+
+- [src/framework/execution/async_lane.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/async_lane.h)
+  - 通用异步执行 lane
+  - 提供 `MergeWhileBusy` 等 waiting 策略
+
+- [src/framework/execution/runtime_invoker.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/runtime_invoker.h)
+  - 普通同步调用和 runtime 同步调用入口
 
 - [src/framework/platform/win_angle_d3d11/win_angle_runtime.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_runtime.cpp)
   - Windows worker ANGLE runtime
@@ -87,7 +111,7 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
 - [src/framework/platform/win_angle_d3d11/win_angle_texture_reader.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_texture_reader.cpp)
   - UI 侧导入共享纹理并生成 `TextureLease`
 
-- [src/adapters/photo_editor/photo_editor_gles2_backend.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/adapters/photo_editor/photo_editor_gles2_backend.cpp)
+- [src/photo_editor/photo_editor_gles2_backend.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_gles2_backend.cpp)
   - 底层 GLES2 photo editor backend
 
 ## 构建环境
@@ -96,19 +120,17 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
 
 - Qt: `D:\CodePrograms\Qt\5.15.1\msvc2019_64`
 - VS 环境脚本: `D:\CodePrograms\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`
-- 构建目录: [build/qt5151-release](/D:/Desktop/AI-Agent/Gles2AsyncRender/build/qt5151-release)
+- Debug 构建目录: [build/qt5151-debug](/D:/Desktop/AI-Agent/Gles2AsyncRender/build/qt5151-debug)
 
 ## 构建方式
 
-在 `build\qt5151-release` 下执行：
+推荐直接使用脚本：
 
-```bat
-call "D:\CodePrograms\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-"D:\CodePrograms\Qt\5.15.1\msvc2019_64\bin\qmake.exe" ..\..\Gles2AsyncRender.pro
-nmake
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\scripts\run-gles2asyncrender.ps1 -Configuration Debug -Reconfigure -Build -KillExisting
 ```
 
-当前这套 `qmake + nmake` 路径已经验证通过。
+如果只想运行已构建程序，可以省略 `-Reconfigure -Build`。
 
 ## 运行方式
 
@@ -120,7 +142,7 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 
 也可以直接运行已构建出的可执行文件：
 
-- [build/qt5151-release/release/Gles2AsyncRender.exe](/D:/Desktop/AI-Agent/Gles2AsyncRender/build/qt5151-release/release/Gles2AsyncRender.exe)
+- [build/qt5151-debug/debug/Gles2AsyncRender.exe](/D:/Desktop/AI-Agent/Gles2AsyncRender/build/qt5151-debug/debug/Gles2AsyncRender.exe)
 
 ## 文档
 
@@ -128,7 +150,8 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
   - 当前代码结构、线程边界、结果模型
 
 - [docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md)
-  - 当前头文件分层、迁移关系、重构收敛结果
+  - 更早一轮的头文件收敛与重构讨论
+  - 其中关于 `request_channel` / `request_dispatcher` / `photo_editor_demo_handlers` 的表述已过时
 
 - [docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md)
   - 更早一轮的跨平台总体设计文档

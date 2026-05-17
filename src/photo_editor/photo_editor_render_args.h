@@ -1,26 +1,29 @@
 #pragma once
 
-#include "framework/execution/execution_types.h"
 #include "image_effect_types.h"
 
 #include <QImage>
 #include <QSize>
 #include <QString>
+#include <QtGlobal>
 
-struct PhotoEditorGpuPreviewPayload final : public IRequestPayload
+struct PhotoEditorSourceSnapshot final
 {
     QString sourceKey;
     quint64 sourceImageCacheKey = 0;
     QImage sourceImage;
+};
+
+struct PhotoEditorGpuPreviewArgs final
+{
+    PhotoEditorSourceSnapshot source;
     ImageEffectParameters parameters;
     QSize outputSize;
 };
 
-struct PhotoEditorCpuPreviewPayload final : public IRequestPayload
+struct PhotoEditorCpuPreviewArgs final
 {
-    QString sourceKey;
-    quint64 sourceImageCacheKey = 0;
-    QImage sourceImage;
+    PhotoEditorSourceSnapshot source;
     ImageEffectParameters parameters;
     QSize previewSize;
 };

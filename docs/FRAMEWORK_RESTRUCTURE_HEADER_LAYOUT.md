@@ -4,7 +4,7 @@
 >
 > 状态：Implemented with minor follow-ups
 >
-> 本文档最初用于指导下一轮代码重构。当前 `framework/platform + framework/execution + app` 主结构已经基本落地，因此本文档现在同时承担两种用途：
+> 本文档最初用于指导下一轮代码重构。当前 `framework/platform + framework/execution + app + photo_editor` 主结构已经基本落地，因此本文档现在同时承担两种用途：
 >
 > - 作为当前头文件分层的实现说明
 > - 作为迁移关系的历史记录
@@ -36,7 +36,7 @@
 - `IWriter` 不由执行层持有。是否把 GPU 结果发布成 UI 可读纹理，由外部在结果完成后决定。
 - 不再保留 `src/framework/qt`。`QOpenGLWidget` 及其 copy/blit 逻辑下放到 `src/app`。
 
-因此，目标结构不再是旧文档中的 `framework/core + framework/platform + framework/qt + adapters/*`，而是以下 3 层主结构：
+因此，目标结构不再是旧文档中的 `framework/core + framework/platform + framework/qt + adapters/*`，而是以下 4 块主结构：
 
 1. `framework/platform`
    - 运行时
@@ -52,7 +52,7 @@
    - UI copy 到本地显示纹理
    - demo 业务 glue
 
-`adapters/photo_editor` 第一阶段只保留底层 `photo_editor_gles2_backend.*`，不再继续把当前 photo editor 的 processor/session/facade 当成框架模板。
+当前实现已经把 photo editor 相关 session / renderer / backend 收敛到 `src/photo_editor`，不再单独保留 `adapters/photo_editor` 目录。
 
 ## 2. 目标目录结构
 
@@ -92,16 +92,19 @@ src/
     photo_editor_demo_handlers.h
     photo_editor_app_session.h
     async_render_main_window.h
-  adapters/
-    photo_editor/
-      photo_editor_gles2_backend.h
+  photo_editor/
+    photo_editor_render_args.h
+    photo_editor_runtime_host.h
+    photo_editor_gpu_session.h
+    photo_editor_cpu_renderer.h
+    photo_editor_gles2_backend.h
 ```
 
 说明：
 
 - `framework/platform` 和 `framework/execution` 是真正可复用的框架层。
 - `app` 是 Qt 与 demo 业务的落地点，不再假装自己是框架。
-- `adapters/photo_editor` 第一阶段只保留底层 GLES2 后端能力。
+- `photo_editor` 是当前 photo editor 业务能力的集中落点。
 
 ## 3. `framework/platform` 头文件清单
 
@@ -590,7 +593,7 @@ public:
 
 说明：
 
-- 因为 `adapters/photo_editor` 第一阶段只保留底层 backend
+- 因为当前 `photo_editor` 目录已经集中承载 backend / session / renderer
 - 当前 photo editor 的请求形状先留在 app，不上升为框架公共模型
 
 ### 5.3 `src/app/photo_editor_demo_handlers.h`
@@ -603,16 +606,16 @@ public:
 职责：
 
 - demo 侧请求处理器
-- 调用 `photo_editor_gles2_backend.*`
+- 调用 `src/photo_editor/photo_editor_gles2_backend.*`
 - 向执行层返回 `RawGpuTextureResult` 或 `CpuImageResult`
 
 说明：
 
 - 这是 demo glue，不属于框架公共 adapter
 - 目的是替代当前：
-  - [photo_editor_work_processor.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/adapters/photo_editor/photo_editor_work_processor.h)
-  - [photo_editor_cpu_preview_processor.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/adapters/photo_editor/photo_editor_cpu_preview_processor.h)
-  - [photo_editor_render_session.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/adapters/photo_editor/photo_editor_render_session.h)
+  - 旧 `photo_editor_work_processor.h`
+  - 旧 `photo_editor_cpu_preview_processor.h`
+  - 旧 `photo_editor_render_session.h`
 
 ### 5.4 `src/app/photo_editor_app_session.h`
 
@@ -646,9 +649,9 @@ public:
 - 持有 `TexturePresentWidget`
 - 持有 `PhotoEditorAppSession`
 
-## 6. `adapters/photo_editor` 头文件清单
+## 6. `photo_editor` 头文件清单
 
-### 6.1 `src/adapters/photo_editor/photo_editor_gles2_backend.h`
+### 6.1 `src/photo_editor/photo_editor_gles2_backend.h`
 
 保留：
 
@@ -679,7 +682,7 @@ public:
 - `framework/platform` 不能 include `QOpenGLWidget` 或 app 头文件
 - `framework/execution` 不能 include Windows D3D11、EGL、Qt widget 头文件
 - `app` 可以 include `framework/platform` 和 `framework/execution`
-- `adapters/photo_editor` 第一阶段只向 app 暴露底层处理函数，不依赖执行层
+- `photo_editor` 可以 include `framework/platform` 和 `framework/execution`
 
 还要遵守以下运行时边界：
 

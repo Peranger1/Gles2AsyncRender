@@ -73,6 +73,9 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     connect(m_worker, &PhotoEditorAppSession::initializationFailed,
             this, &AsyncRenderMainWindow::onWorkerError,
             Qt::QueuedConnection);
+    connect(m_worker, &PhotoEditorAppSession::requestWarning,
+            this, &AsyncRenderMainWindow::onWorkerWarning,
+            Qt::QueuedConnection);
     connect(m_worker, &PhotoEditorAppSession::imageDirectoryLoadFinished,
             this, &AsyncRenderMainWindow::onImageDirectoryLoadFinished,
             Qt::QueuedConnection);
@@ -256,6 +259,16 @@ void AsyncRenderMainWindow::onWorkerError(const QString &reason)
 {
     logWindowMessage(QStringLiteral("Worker error: %1").arg(reason));
     QMessageBox::warning(this, QStringLiteral("Worker Error"), reason);
+}
+
+void AsyncRenderMainWindow::onWorkerWarning(const QString &reason)
+{
+    if (reason.isEmpty()) {
+        return;
+    }
+
+    logWindowMessage(QStringLiteral("Worker warning: %1").arg(reason));
+    statusBar()->showMessage(reason, 5000);
 }
 
 void AsyncRenderMainWindow::setupActions()

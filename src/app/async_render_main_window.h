@@ -42,6 +42,7 @@ private slots:
                                       QSize imageSize);
     void onImageSelectionChanged(int currentIndex, int count, const QString &displayName, QSize imageSize);
     void onWorkerError(const QString &reason);
+    void onWorkerWarning(const QString &reason);
     void showCpuPreviewDialog(const QImage &image, const QString &description);
     void runCpuPreviewInspection();
 
