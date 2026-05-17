@@ -5,6 +5,7 @@
 #include "framework/execution/runtime_invoker.h"
 #include "framework/platform/texture_types.h"
 #include "image_effect_types.h"
+#include "photo_editor/photo_editor_result_types.h"
 #include "photo_editor/photo_editor_gpu_session.h"
 #include "photo_editor/photo_editor_render_args.h"
 
@@ -15,9 +16,7 @@
 #include <memory>
 
 class IPlatformBackend;
-class IRuntime;
-class PhotoEditorRuntimeHost;
-struct RawGpuTextureResult;
+class QtRuntimeHost;
 
 class PhotoEditorAppSession final : public QObject
 {
@@ -29,18 +28,16 @@ public:
 
 public slots:
     bool initialize(IPlatformBackend *backend, QSize outputSize);
-    void setOutputSize(QSize size);
+    void setOutputSize(QSize size, quint64 outputRevision);
     void setEffectParameters(const ImageEffectParameters &parameters);
     void loadImageDirectory(const QString &directoryPath);
     void selectNextImage();
     void selectPreviousImage();
     void requestRender();
     void requestCpuPreview();
-    void onTextureConsumed();
     void shutdown();
 
 signals:
-    void textureReady(const TextureTicket &ticket);
     void initializationFailed(const QString &reason);
     void requestWarning(const QString &reason);
     void imageDirectoryLoadFinished(bool loaded,
@@ -53,13 +50,6 @@ signals:
     void cpuPreviewReady(const QImage &image, const QString &description);
 
 private:
-    enum class GpuPublishDisposition
-    {
-        Published,
-        RetryLater,
-        Failed
-    };
-
     struct ImageCatalogState;
 
     class PhotoEditorGpuPreviewArgsMerger final : public IWaitingMerger<PhotoEditorGpuPreviewArgs>
@@ -78,22 +68,17 @@ private:
     void emitImageSelection();
     void submitGpuPreview();
     void runCpuPreviewSync();
-    void handleGpuPreviewCompleted(TaskId taskId,
-                                   ExecutionOutcome<RawGpuTextureResult> outcome);
-    GpuPublishDisposition tryPublishGpuResult(const RawGpuTextureResult &gpuResult,
-                                              IRuntime *sourceRuntime);
+    void handleGpuPreviewCompleted(TaskId taskId, ExecutionOutcome<RawGpuTextureResult> outcome);
 
     std::unique_ptr<ImageCatalogState> m_catalog;
     IPlatformBackend *m_backend = nullptr;
-    std::unique_ptr<PhotoEditorRuntimeHost> m_runtimeHost;
+    std::unique_ptr<QtRuntimeHost> m_runtimeHost;
     std::unique_ptr<RuntimeInvoker> m_invoker;
     std::unique_ptr<PhotoEditorGpuSession> m_gpuSession;
     std::unique_ptr<AsyncLane<PhotoEditorGpuPreviewArgs, RawGpuTextureResult>> m_gpuPreviewLane;
     ImageEffectParameters m_effectParameters;
     QSize m_outputSize;
+    quint64 m_outputRevision = 0;
     bool m_initialized = false;
     bool m_shuttingDown = false;
-    bool m_hasPendingGpuPublish = false;
-    RawGpuTextureResult m_pendingGpuPublish;
-    IRuntime *m_pendingGpuRuntime = nullptr;
 };

@@ -1,5 +1,14 @@
 # 框架重构头文件清单与类名分布方案
 
+> 历史文档 / 非当前正式架构说明
+>
+> 当前框架的正式文档只包括：
+>
+> - [README.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/README.md)
+> - [ARCHITECTURE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/ARCHITECTURE.md)
+>
+> 本文档保留为历史重构记录。若本文内容与当前代码、`README.md`、`ARCHITECTURE.md` 不一致，一律以当前代码、`README.md`、`ARCHITECTURE.md` 为准。
+
 > 日期：2026-05-16
 >
 > 状态：Implemented with minor follow-ups
@@ -9,17 +18,26 @@
 > - 作为当前头文件分层的实现说明
 > - 作为迁移关系的历史记录
 >
-> 当前代码状态请同时参考：
+> 当前代码状态请优先参考：
 >
 > - [ARCHITECTURE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/ARCHITECTURE.md)
-> - [docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md)
+> - [README.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/README.md)
+>
+> 额外说明：
+>
+> - 本文中若出现 `MergeWhileBusy` 只保留单 waiting、或平台层只保留单 pending 槽的表述，应以当前代码为准
+> - 当前代码的 GPU 预览主路径已经是“多 checkpoint waiting + tail merge + multi-ready texture queue”
+> - 当前 `TextureTicket` 额外携带 `outputRevision`，用于隔离 resize 前后的结果
+> - 当前 `IWriter` 已改为 `submitTexture() + drainPendingPublishes() + pendingPublishState()`，不再是单个 `publishTexture(...) -> bool`
+> - 当前 publish capacity 事件来自平台层 reader release，不再来自 widget 信号桥接
+> - 当前 `RuntimeHost` 的 Qt 默认实现已经命名为 `QtRuntimeHost`，并放在 `src/framework/execution/qt_runtime_host.*`
 
 ## 0. 当前实现状态
 
 截至当前代码版本，以下目标已经完成：
 
 - `framework/platform` 公共合同与 Windows ANGLE D3D11 实现已落地
-- `framework/execution` 已落地，并由 `RequestChannel` 根据 `RequestTypeDescriptor.queuePolicy` 自行创建 waiting policy
+- `framework/execution` 已落地，当前主路径为 `RuntimeHost + QtRuntimeHost + RuntimeInvoker + AsyncLane + SyncLane`
 - `app/texture_present_widget.*`、`photo_editor_demo_*`、`photo_editor_app_session.*` 已落地
 - 旧 `framework/core`、`framework/qt`、旧 photo editor processor/session 链路已删除
 - `WinAngleRuntime` 已不再依赖旧 `angle_standalone_runtime.*`
@@ -94,7 +112,6 @@ src/
     async_render_main_window.h
   photo_editor/
     photo_editor_render_args.h
-    photo_editor_runtime_host.h
     photo_editor_gpu_session.h
     photo_editor_cpu_renderer.h
     photo_editor_gles2_backend.h
@@ -105,10 +122,16 @@ src/
 - `framework/platform` 和 `framework/execution` 是真正可复用的框架层。
 - `app` 是 Qt 与 demo 业务的落地点，不再假装自己是框架。
 - `photo_editor` 是当前 photo editor 业务能力的集中落点。
+- 上面这棵目录树保留为当时的目标结构草案，不等同于当前仓库逐文件现状。
 
 ## 3. `framework/platform` 头文件清单
 
 ### 3.1 `src/framework/platform/runtime_types.h`
+
+说明：
+
+- 本节保留为上一版目录提案记录。
+- 当前代码没有保留独立的 `runtime_types.h` 头文件；当前运行时公共合同以 `runtime.h`、`platform_backend.h` 和执行层现有类型为准。
 
 放置：
 
@@ -223,6 +246,16 @@ public:
 };
 ```
 
+上面这组 `IWriter` 接口是上一版接口草案，不代表当前代码。
+
+当前代码已经改为：
+
+- `submitTexture(GLuint sourceTextureId, const QSize &size, quint64 outputRevision) -> PublishResult`
+- `drainPendingPublishes() -> PublishDrainResult`
+- `pendingPublishState() -> PendingPublishState`
+
+这样 `Queued`、pending latest frame 和 publish capacity 协调都继续留在平台层，而不是由 app 侧做 busy/retry 编排。
+
 ### 3.6 `src/framework/platform/platform_backend.h`
 
 放置：
@@ -247,6 +280,14 @@ public:
     virtual IWriter *writer() const = 0;
 };
 ```
+
+上面这组 `IPlatformBackend` 接口也是上一版接口草案。
+
+当前代码对应接口还额外暴露：
+
+- `presentationEvents() -> PlatformPresentationEvents *`
+
+用于把 reader release 后的 publish capacity 变化从平台层通知到 worker，而不是继续通过 widget 事件桥接。
 
 这一层不再包含：
 

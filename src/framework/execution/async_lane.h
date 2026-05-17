@@ -78,9 +78,15 @@ public:
                         break;
                     }
 
+                    if (m_waiting.size() < qMax(1, m_config.maxWaitingCount)) {
+                        m_waiting.push_back(task);
+                        result.accepted = true;
+                        break;
+                    }
+
                     if (!m_merger || !m_merger->canMerge(m_waiting.back().args, task.args)) {
                         result.error.state = TaskState::Rejected;
-                        result.error.message = QStringLiteral("The async lane could not merge the waiting task.");
+                        result.error.message = QStringLiteral("The async lane could not merge the waiting tail task.");
                         return result;
                     }
 
@@ -179,6 +185,7 @@ private:
     {
         std::optional<PendingTask> completed;
         std::optional<PendingTask> next;
+        bool shouldDeliverCompleted = true;
         {
             QMutexLocker locker(&m_mutex);
             if (!m_active.has_value() || m_active->id != taskId) {
@@ -186,6 +193,9 @@ private:
             }
 
             completed = m_active;
+            if (m_config.deliveryPolicy == DeliveryPolicyKind::DropStaleStartedResults && !m_waiting.empty()) {
+                shouldDeliverCompleted = false;
+            }
             m_active.reset();
             if (!m_waiting.empty()) {
                 next = m_waiting.front();
@@ -194,7 +204,7 @@ private:
             }
         }
 
-        if (completed.has_value() && completed->completion) {
+        if (shouldDeliverCompleted && completed.has_value() && completed->completion) {
             completed->completion(taskId, std::move(outcome));
         }
         if (next.has_value()) {

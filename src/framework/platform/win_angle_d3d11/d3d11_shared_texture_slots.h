@@ -3,6 +3,7 @@
 #include "framework/platform/texture_types.h"
 
 #include <QMutex>
+#include <QQueue>
 #include <QSize>
 #include <QVector>
 #include <QtGlobal>
@@ -37,7 +38,7 @@ public:
             slot.generation = 0;
             slot.frameIndex = 0;
         }
-        m_pendingSlot = -1;
+        m_readySlots.clear();
     }
 
     void updateSlot(int slotIndex, quintptr sharedHandle, const QSize &size, quint64 generation)
@@ -74,10 +75,6 @@ public:
     bool tryAcquireRenderSlot(int *slotIndex)
     {
         QMutexLocker locker(&m_mutex);
-        if (m_pendingSlot != -1) {
-            return false;
-        }
-
         for (int i = 0; i < m_slots.size(); ++i) {
             Slot &slot = m_slots[i];
             if (slot.state == SlotState::Free) {
@@ -88,6 +85,25 @@ public:
                 return true;
             }
         }
+
+        if (!m_readySlots.isEmpty()) {
+            const int recycledSlotIndex = m_readySlots.dequeue();
+            if (!isValidSlotIndex(recycledSlotIndex)) {
+                return false;
+            }
+
+            Slot &slot = m_slots[recycledSlotIndex];
+            if (slot.state != SlotState::Ready) {
+                return false;
+            }
+
+            slot.state = SlotState::Rendering;
+            if (slotIndex) {
+                *slotIndex = recycledSlotIndex;
+            }
+            return true;
+        }
+
         return false;
     }
 
@@ -104,7 +120,7 @@ public:
         }
     }
 
-    bool submitRenderedTexture(int slotIndex, quint64 frameIndex, TextureTicket *ticket)
+    bool submitRenderedTexture(int slotIndex, quint64 frameIndex, quint64 outputRevision, TextureTicket *ticket)
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex) || ticket == nullptr) {
@@ -116,30 +132,27 @@ public:
             return false;
         }
 
-        if (m_pendingSlot != -1 && m_pendingSlot != slotIndex) {
-            return false;
-        }
-
-        slot.state = SlotState::Pending;
+        slot.state = SlotState::Ready;
         slot.frameIndex = frameIndex;
-        m_pendingSlot = slotIndex;
+        m_readySlots.enqueue(slotIndex);
 
         ticket->slotIndex = slotIndex;
         ticket->generation = slot.generation;
         ticket->frameIndex = slot.frameIndex;
+        ticket->outputRevision = outputRevision;
         ticket->size = slot.size;
         return true;
     }
 
-    bool consumePendingTexture(const TextureTicket &ticket, D3D11SharedTextureSlotInfo *slotInfo)
+    bool acquireReadyTexture(const TextureTicket &ticket, D3D11SharedTextureSlotInfo *slotInfo)
     {
         QMutexLocker locker(&m_mutex);
-        if (!isValidSlotIndex(ticket.slotIndex) || m_pendingSlot != ticket.slotIndex || slotInfo == nullptr) {
+        if (!isValidSlotIndex(ticket.slotIndex) || slotInfo == nullptr) {
             return false;
         }
 
-        const Slot &slot = m_slots[ticket.slotIndex];
-        if (slot.state != SlotState::Pending) {
+        Slot &slot = m_slots[ticket.slotIndex];
+        if (slot.state != SlotState::Ready) {
             return false;
         }
         if (slot.generation != ticket.generation || slot.frameIndex != ticket.frameIndex) {
@@ -149,10 +162,12 @@ public:
         slotInfo->sharedHandle = slot.sharedHandle;
         slotInfo->size = slot.size;
         slotInfo->generation = slot.generation;
+        slot.state = SlotState::Reading;
+        removeReadySlot(ticket.slotIndex);
         return true;
     }
 
-    void releasePendingSlot(int slotIndex)
+    void releaseReadingSlot(int slotIndex)
     {
         QMutexLocker locker(&m_mutex);
         if (!isValidSlotIndex(slotIndex)) {
@@ -160,9 +175,8 @@ public:
         }
 
         Slot &slot = m_slots[slotIndex];
-        if (slot.state == SlotState::Pending && m_pendingSlot == slotIndex) {
+        if (slot.state == SlotState::Reading) {
             slot.state = SlotState::Free;
-            m_pendingSlot = -1;
         }
     }
 
@@ -171,7 +185,8 @@ private:
     {
         Free,
         Rendering,
-        Pending
+        Ready,
+        Reading
     };
 
     struct Slot final
@@ -188,7 +203,17 @@ private:
         return slotIndex >= 0 && slotIndex < m_slots.size();
     }
 
+    void removeReadySlot(int slotIndex)
+    {
+        for (int i = 0; i < m_readySlots.size(); ++i) {
+            if (m_readySlots[i] == slotIndex) {
+                m_readySlots.removeAt(i);
+                return;
+            }
+        }
+    }
+
     mutable QMutex m_mutex;
     QVector<Slot> m_slots;
-    int m_pendingSlot = -1;
+    QQueue<int> m_readySlots;
 };

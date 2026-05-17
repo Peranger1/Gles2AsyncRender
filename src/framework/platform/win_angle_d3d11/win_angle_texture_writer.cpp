@@ -3,6 +3,7 @@
 #include "d3d11_shared_texture_slots.h"
 #include "framework/backend/win_angle_d3d11/gles2_proc_table.h"
 #include "framework/backend/win_angle_d3d11/gles2_shader_utils.h"
+#include "framework/execution/runtime_host.h"
 #include "runtime_diagnostics.h"
 #include "win_angle_runtime.h"
 
@@ -11,6 +12,7 @@
 #include <QString>
 #include <QVector>
 
+#include <atomic>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
@@ -23,6 +25,26 @@ enum class PublishMode
 {
     Auto,
     ForceCpu
+};
+
+enum class SubmitTextureResultKind
+{
+    Published,
+    Queued,
+    Failed
+};
+
+struct SubmitTextureResult final
+{
+    SubmitTextureResultKind kind = SubmitTextureResultKind::Failed;
+    TextureTicket ticket;
+    QString error;
+};
+
+struct DrainPendingPublishesResult final
+{
+    QVector<TextureTicket> tickets;
+    QString error;
 };
 
 constexpr GLenum kBackBuffer = EGL_BACK_BUFFER;
@@ -131,13 +153,24 @@ struct WinAngleTextureWriter::Impl final
         ComPtr<IDXGIKeyedMutex> keyedMutex;
     };
 
+    struct PendingLatestFrame final
+    {
+        GLuint textureId = 0U;
+        QSize size;
+        quint64 outputRevision = 0;
+        bool valid = false;
+    };
+
     explicit Impl(const std::shared_ptr<D3D11SharedTextureSlots> &sharedTextureSlots)
         : slotPool(sharedTextureSlots)
     {
     }
 
     std::shared_ptr<D3D11SharedTextureSlots> slotPool;
-    std::shared_ptr<RuntimeBindingState> runtimeBinding;
+    std::atomic<RuntimeHost *> host { nullptr };
+    std::atomic<IRuntime *> attachedRuntime { nullptr };
+    std::atomic<IWriterEvents *> eventSink { nullptr };
+    std::atomic_bool drainScheduled { false };
     QVector<SlotResources> slotResources;
     QVector<ImportedSlot> importedSlots;
     GLuint publishFramebufferId = 0;
@@ -154,6 +187,7 @@ struct WinAngleTextureWriter::Impl final
     QByteArray uploadBytes;
     quint64 publicationCounter = 0;
     bool initialized = false;
+    PendingLatestFrame pendingLatestFrame;
 
     bool hasGlResources() const noexcept
     {
@@ -167,12 +201,31 @@ struct WinAngleTextureWriter::Impl final
             }
         }
 
+        if (pendingLatestFrame.textureId != 0U) {
+            return true;
+        }
+
         return false;
+    }
+
+    bool hasPendingFrame() const noexcept
+    {
+        return pendingLatestFrame.valid;
+    }
+
+    RuntimeHost *runtimeHost() const noexcept
+    {
+        return host.load(std::memory_order_acquire);
     }
 
     WinAngleRuntime *runtime() const noexcept
     {
-        return runtimeBinding ? runtimeBinding->runtime : nullptr;
+        return dynamic_cast<WinAngleRuntime *>(attachedRuntime.load(std::memory_order_acquire));
+    }
+
+    IWriterEvents *events() const noexcept
+    {
+        return eventSink.load(std::memory_order_acquire);
     }
 
     const Gles2ProcTable *gl() const
@@ -295,48 +348,74 @@ void main()
         return true;
     }
 
-    bool publishTexture(GLuint sourceTextureId,
-                        const QSize &sourceSize,
-                        TextureTicket *ticket,
-                        QString *error)
+    SubmitTextureResult submitTexture(GLuint sourceTextureId,
+                                      const QSize &sourceSize,
+                                      quint64 outputRevision)
     {
-        if (!initialize(error)) {
-            return false;
+        SubmitTextureResult result;
+        QString error;
+        if (!initialize(&error)) {
+            result.kind = SubmitTextureResultKind::Failed;
+            result.error = std::move(error);
+            return result;
         }
         if (sourceTextureId == 0U || !sourceSize.isValid()) {
-            if (error) {
-                *error = QStringLiteral("WinAngleTextureWriter only supports valid GPU texture results.");
-            }
-            return false;
+            result.kind = SubmitTextureResultKind::Failed;
+            result.error = QStringLiteral("WinAngleTextureWriter only supports valid GPU texture results.");
+            return result;
         }
 
-        int renderSlot = -1;
-        if (!slotPool->tryAcquireRenderSlot(&renderSlot)) {
-            if (error) {
-                error->clear();
-            }
-            return false;
-        }
-
-        const bool publishOk = publishToSlot(sourceTextureId, sourceSize, renderSlot, error);
-        if (!publishOk) {
-            slotPool->abandonRenderSlot(renderSlot);
-            return false;
-        }
-
+        const QSize safeSize = sanitizedSize(sourceSize);
         TextureTicket publishedTicket;
-        if (!slotPool->submitRenderedTexture(renderSlot, ++publicationCounter, &publishedTicket)) {
-            slotPool->abandonRenderSlot(renderSlot);
-            if (error) {
-                *error = QStringLiteral("Failed to submit the published texture into the shared slot pool.");
-            }
-            return false;
+        bool busy = false;
+        if (tryPublishNow(sourceTextureId, safeSize, outputRevision, &publishedTicket, &error, &busy)) {
+            invalidatePendingLatestFrame();
+            result.kind = SubmitTextureResultKind::Published;
+            result.ticket = publishedTicket;
+            return result;
         }
 
-        if (ticket != nullptr) {
-            *ticket = publishedTicket;
+        if (!busy) {
+            result.kind = SubmitTextureResultKind::Failed;
+            result.error = std::move(error);
+            return result;
         }
-        return true;
+
+        if (!stagePendingLatestFrame(sourceTextureId, safeSize, outputRevision, &error)) {
+            result.kind = SubmitTextureResultKind::Failed;
+            result.error = std::move(error);
+            return result;
+        }
+
+        result.kind = SubmitTextureResultKind::Queued;
+        return result;
+    }
+
+    DrainPendingPublishesResult drainPendingPublishes()
+    {
+        DrainPendingPublishesResult result;
+        if (!pendingLatestFrame.valid) {
+            return result;
+        }
+
+        QString error;
+        TextureTicket publishedTicket;
+        bool busy = false;
+        if (tryPublishNow(pendingLatestFrame.textureId,
+                          pendingLatestFrame.size,
+                          pendingLatestFrame.outputRevision,
+                          &publishedTicket,
+                          &error,
+                          &busy)) {
+            invalidatePendingLatestFrame();
+            result.tickets.push_back(publishedTicket);
+            return result;
+        }
+
+        if (!busy) {
+            result.error = std::move(error);
+        }
+        return result;
     }
 
     bool publishToSlot(GLuint sourceTextureId,
@@ -389,6 +468,42 @@ void main()
         return publishViaCpuFallback(slotIndex, sourceTextureId, safeSize, error);
     }
 
+    bool tryPublishNow(GLuint sourceTextureId,
+                       const QSize &sourceSize,
+                       quint64 outputRevision,
+                       TextureTicket *ticket,
+                       QString *error,
+                       bool *busy)
+    {
+        if (busy) {
+            *busy = false;
+        }
+
+        int renderSlot = -1;
+        if (!slotPool->tryAcquireRenderSlot(&renderSlot)) {
+            if (busy) {
+                *busy = true;
+            }
+            return false;
+        }
+
+        const bool publishOk = publishToSlot(sourceTextureId, sourceSize, renderSlot, error);
+        if (!publishOk) {
+            slotPool->abandonRenderSlot(renderSlot);
+            return false;
+        }
+
+        if (!slotPool->submitRenderedTexture(renderSlot, ++publicationCounter, outputRevision, ticket)) {
+            slotPool->abandonRenderSlot(renderSlot);
+            if (error) {
+                *error = QStringLiteral("Failed to submit the published texture into the shared slot pool.");
+            }
+            return false;
+        }
+
+        return true;
+    }
+
     void shutdown()
     {
         releaseGlResources();
@@ -410,6 +525,8 @@ void main()
         for (int i = 0; i < importedSlots.size(); ++i) {
             destroyImportedSlot(i);
         }
+
+        destroyPendingLatestFrame();
 
         if (publishFramebufferId != 0U) {
             procTable->glDeleteFramebuffers(1, &publishFramebufferId);
@@ -633,6 +750,146 @@ void main()
         slot.sharedHandle = 0;
         slot.generation = 0;
         slot.size = {};
+    }
+
+    bool ensurePendingLatestFrameTexture(const QSize &size, QString *error)
+    {
+        const Gles2ProcTable *procTable = gl();
+        if (procTable == nullptr || publishFramebufferId == 0U) {
+            if (error) {
+                *error = QStringLiteral("The WinAngleTextureWriter pending frame target is not initialized.");
+            }
+            return false;
+        }
+
+        if (pendingLatestFrame.textureId == 0U) {
+            procTable->glGenTextures(1, &pendingLatestFrame.textureId);
+            if (pendingLatestFrame.textureId == 0U) {
+                if (error) {
+                    *error = QStringLiteral("Failed to create the WinAngleTextureWriter pending frame texture.");
+                }
+                return false;
+            }
+        }
+
+        procTable->glBindTexture(GL_TEXTURE_2D, pendingLatestFrame.textureId);
+        procTable->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        procTable->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        procTable->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        procTable->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (pendingLatestFrame.size != size) {
+            procTable->glTexImage2D(GL_TEXTURE_2D,
+                                    0,
+                                    GL_RGBA,
+                                    size.width(),
+                                    size.height(),
+                                    0,
+                                    GL_RGBA,
+                                    GL_UNSIGNED_BYTE,
+                                    nullptr);
+            const GLenum allocError = procTable->glGetError();
+            if (allocError != GL_NO_ERROR) {
+                procTable->glBindTexture(GL_TEXTURE_2D, 0);
+                if (error) {
+                    *error = QStringLiteral("Failed to allocate the WinAngleTextureWriter pending frame texture: %1")
+                                 .arg(glErrorHex(allocError));
+                }
+                return false;
+            }
+            pendingLatestFrame.size = size;
+        }
+        procTable->glBindTexture(GL_TEXTURE_2D, 0);
+        return true;
+    }
+
+    bool renderIntoLocalTexture(GLuint targetTextureId,
+                                const QSize &targetSize,
+                                GLuint sourceTextureId,
+                                QString *error)
+    {
+        const Gles2ProcTable *procTable = gl();
+        if (procTable == nullptr || publishFramebufferId == 0U || targetTextureId == 0U || sourceTextureId == 0U) {
+            if (error) {
+                *error = QStringLiteral("The WinAngleTextureWriter local staging path is unavailable.");
+            }
+            return false;
+        }
+
+        procTable->glBindFramebuffer(GL_FRAMEBUFFER, publishFramebufferId);
+        procTable->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, targetTextureId, 0);
+        const GLenum status = procTable->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            procTable->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            procTable->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (error) {
+                *error = QStringLiteral("The WinAngleTextureWriter local staging framebuffer is incomplete: 0x%1")
+                             .arg(unsigned(status), 0, 16);
+            }
+            return false;
+        }
+
+        procTable->glViewport(0, 0, targetSize.width(), targetSize.height());
+        procTable->glUseProgram(program);
+        procTable->glActiveTexture(GL_TEXTURE0);
+        procTable->glBindTexture(GL_TEXTURE_2D, sourceTextureId);
+        procTable->glUniform1i(samplerLocation, 0);
+        procTable->glVertexAttribPointer(GLuint(positionLocation), 2, GL_FLOAT, GL_FALSE, 0, kVertices);
+        procTable->glEnableVertexAttribArray(GLuint(positionLocation));
+        procTable->glVertexAttribPointer(GLuint(texCoordLocation), 2, GL_FLOAT, GL_FALSE, 0, kTexCoords);
+        procTable->glEnableVertexAttribArray(GLuint(texCoordLocation));
+        procTable->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        procTable->glDisableVertexAttribArray(GLuint(positionLocation));
+        procTable->glDisableVertexAttribArray(GLuint(texCoordLocation));
+        procTable->glBindTexture(GL_TEXTURE_2D, 0);
+        procTable->glUseProgram(0);
+        procTable->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        procTable->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        procTable->glFlush();
+
+        const GLenum glError = procTable->glGetError();
+        if (glError != GL_NO_ERROR) {
+            if (error) {
+                *error = QStringLiteral("The WinAngleTextureWriter local staging copy failed with GL error %1")
+                             .arg(glErrorHex(glError));
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    bool stagePendingLatestFrame(GLuint sourceTextureId,
+                                 const QSize &sourceSize,
+                                 quint64 outputRevision,
+                                 QString *error)
+    {
+        if (!ensurePendingLatestFrameTexture(sourceSize, error)
+            || !renderIntoLocalTexture(pendingLatestFrame.textureId, sourceSize, sourceTextureId, error)) {
+            return false;
+        }
+
+        pendingLatestFrame.size = sourceSize;
+        pendingLatestFrame.outputRevision = outputRevision;
+        pendingLatestFrame.valid = true;
+        return true;
+    }
+
+    void invalidatePendingLatestFrame()
+    {
+        pendingLatestFrame.valid = false;
+        pendingLatestFrame.outputRevision = 0;
+    }
+
+    void destroyPendingLatestFrame()
+    {
+        const Gles2ProcTable *procTable = gl();
+        if (procTable && pendingLatestFrame.textureId != 0U) {
+            procTable->glDeleteTextures(1, &pendingLatestFrame.textureId);
+        }
+        pendingLatestFrame.textureId = 0U;
+        pendingLatestFrame.size = {};
+        pendingLatestFrame.outputRevision = 0;
+        pendingLatestFrame.valid = false;
     }
 
     bool renderIntoImportedSlot(int slotIndex,
@@ -899,11 +1156,9 @@ void main()
     }
 };
 
-WinAngleTextureWriter::WinAngleTextureWriter(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool,
-                                             const std::shared_ptr<RuntimeBindingState> &runtimeBinding)
+WinAngleTextureWriter::WinAngleTextureWriter(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool)
     : m_impl(std::make_unique<Impl>(slotPool))
 {
-    m_impl->runtimeBinding = runtimeBinding;
 }
 
 WinAngleTextureWriter::~WinAngleTextureWriter()
@@ -911,15 +1166,29 @@ WinAngleTextureWriter::~WinAngleTextureWriter()
     reset();
 }
 
-bool WinAngleTextureWriter::publishTexture(GLuint sourceTextureId,
-                                           const QSize &size,
-                                           TextureTicket *ticket,
-                                           QString *error)
+void WinAngleTextureWriter::attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events)
 {
-    WinAngleRuntime *activeRuntime = (m_impl && m_impl->runtimeBinding) ? m_impl->runtimeBinding->runtime : nullptr;
-    if (!m_impl || !activeRuntime || !m_impl->slotPool) {
+    if (!m_impl) {
+        return;
+    }
+
+    m_impl->host.store(host, std::memory_order_release);
+    m_impl->attachedRuntime.store(runtime, std::memory_order_release);
+    m_impl->eventSink.store(events, std::memory_order_release);
+    m_impl->drainScheduled.store(false, std::memory_order_release);
+}
+
+bool WinAngleTextureWriter::submitTexture(GLuint sourceTextureId,
+                                          const QSize &size,
+                                          quint64 outputRevision,
+                                          QString *error)
+{
+    WinAngleRuntime *activeRuntime = m_impl ? m_impl->runtime() : nullptr;
+    RuntimeHost *host = m_impl ? m_impl->runtimeHost() : nullptr;
+    IWriterEvents *events = m_impl ? m_impl->events() : nullptr;
+    if (!m_impl || !activeRuntime || !host || !events || !m_impl->slotPool) {
         if (error) {
-            *error = QStringLiteral("WinAngleTextureWriter requires a valid runtime and slot pool.");
+            *error = QStringLiteral("WinAngleTextureWriter requires a valid runtime host, runtime, event sink, and slot pool.");
         }
         return false;
     }
@@ -927,15 +1196,88 @@ bool WinAngleTextureWriter::publishTexture(GLuint sourceTextureId,
     QString enterError;
     if (!activeRuntime->enter(&enterError)) {
         if (error) {
-            *error = enterError;
+            *error = std::move(enterError);
         }
         return false;
     }
 
-    const bool ok = m_impl->publishTexture(sourceTextureId, size, ticket, error);
+    const SubmitTextureResult result = m_impl->submitTexture(sourceTextureId, size, outputRevision);
 
     activeRuntime->leave();
-    return ok;
+
+    switch (result.kind) {
+    case SubmitTextureResultKind::Published:
+        events->onTextureReady(result.ticket);
+        return true;
+    case SubmitTextureResultKind::Queued:
+        return true;
+    case SubmitTextureResultKind::Failed:
+    default:
+        if (error) {
+            *error = result.error;
+        }
+        return false;
+    }
+}
+
+void WinAngleTextureWriter::notifyPresentationCapacityAvailable()
+{
+    if (!m_impl) {
+        return;
+    }
+
+    if (m_impl->drainScheduled.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    RuntimeHost *host = m_impl->runtimeHost();
+    if (host == nullptr) {
+        m_impl->drainScheduled.store(false, std::memory_order_release);
+        return;
+    }
+
+    QString dispatchError;
+    const bool dispatched = host->dispatchAsync([this](IRuntime *runtime) {
+        if (!m_impl) {
+            return;
+        }
+
+        m_impl->drainScheduled.store(false, std::memory_order_release);
+
+        if (!m_impl->hasPendingFrame() || runtime == nullptr || runtime != m_impl->attachedRuntime.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        IWriterEvents *events = m_impl->events();
+        QString enterError;
+        if (!runtime->enter(&enterError)) {
+            if (events && !enterError.isEmpty()) {
+                events->onWarning(enterError);
+            }
+            return;
+        }
+
+        const DrainPendingPublishesResult result = m_impl->drainPendingPublishes();
+        runtime->leave();
+
+        if (events == nullptr) {
+            return;
+        }
+        if (!result.error.isEmpty()) {
+            events->onWarning(result.error);
+            return;
+        }
+        for (const TextureTicket &ticket : result.tickets) {
+            events->onTextureReady(ticket);
+        }
+    }, &dispatchError);
+    if (!dispatched) {
+        m_impl->drainScheduled.store(false, std::memory_order_release);
+        IWriterEvents *events = m_impl->events();
+        if (events && !dispatchError.isEmpty()) {
+            events->onWarning(dispatchError);
+        }
+    }
 }
 
 void WinAngleTextureWriter::reset()
@@ -943,6 +1285,10 @@ void WinAngleTextureWriter::reset()
     if (!m_impl) {
         return;
     }
+
+    m_impl->host.store(nullptr, std::memory_order_release);
+    m_impl->eventSink.store(nullptr, std::memory_order_release);
+    m_impl->drainScheduled.store(false, std::memory_order_release);
 
     if (m_impl->hasGlResources()) {
         QString unusedError;
@@ -956,6 +1302,8 @@ void WinAngleTextureWriter::reset()
     } else {
         m_impl->shutdown();
     }
+
+    m_impl->attachedRuntime.store(nullptr, std::memory_order_release);
 
     if (m_impl->slotPool) {
         m_impl->slotPool->reset();

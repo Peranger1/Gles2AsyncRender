@@ -1,6 +1,7 @@
 #include "win_angle_texture_reader.h"
 
 #include "framework/backend/win_angle_d3d11/qt_angle_egl_tools.h"
+#include "framework/platform/presentation_events.h"
 #include "d3d11_shared_texture_slots.h"
 
 #include <QOpenGLContext>
@@ -8,8 +9,10 @@
 
 #include <QtANGLE/EGL/eglext.h>
 
-WinAngleTextureReader::WinAngleTextureReader(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool)
+WinAngleTextureReader::WinAngleTextureReader(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool,
+                                             PlatformPresentationEvents *presentationEvents)
     : m_slotPool(slotPool)
+    , m_presentationEvents(presentationEvents)
 {
 }
 
@@ -63,22 +66,22 @@ bool WinAngleTextureReader::acquire(const TextureTicket &ticket, TextureLease *l
     }
 
     D3D11SharedTextureSlotInfo slotInfo;
-    if (!m_slotPool->consumePendingTexture(ticket, &slotInfo)) {
+    if (!m_slotPool->acquireReadyTexture(ticket, &slotInfo)) {
         if (error) {
-            *error = QStringLiteral("The requested texture ticket is no longer pending.");
+            *error = QStringLiteral("The requested texture ticket is no longer ready for reading.");
         }
         return false;
     }
 
     if (!ensureImportedSlot(ticket.slotIndex, ticket.size, error)) {
-        m_slotPool->releasePendingSlot(ticket.slotIndex);
+        m_slotPool->releaseReadingSlot(ticket.slotIndex);
         return false;
     }
 
     ImportedSlot &slot = m_importedSlots[ticket.slotIndex];
     const HRESULT acquireHr = slot.keyedMutex->AcquireSync(1, 5);
     if (acquireHr != S_OK) {
-        m_slotPool->releasePendingSlot(ticket.slotIndex);
+        m_slotPool->releaseReadingSlot(ticket.slotIndex);
         if (error) {
             *error = QStringLiteral("AcquireSync(slot %1, key 1) failed: 0x%2")
                          .arg(ticket.slotIndex)
@@ -91,7 +94,7 @@ bool WinAngleTextureReader::acquire(const TextureTicket &ticket, TextureLease *l
     if (m_eglApi->bindTexImage(m_eglDisplay, slot.surface, EGL_BACK_BUFFER) != EGL_TRUE) {
         m_gl->glBindTexture(GL_TEXTURE_2D, 0);
         slot.keyedMutex->ReleaseSync(0);
-        m_slotPool->releasePendingSlot(ticket.slotIndex);
+        m_slotPool->releaseReadingSlot(ticket.slotIndex);
         if (error) {
             *error = QStringLiteral("eglBindTexImage(slot %1) failed with EGL error %2")
                          .arg(ticket.slotIndex)
@@ -125,7 +128,10 @@ void WinAngleTextureReader::release(const TextureLease &lease)
     }
 
     m_gl->glBindTexture(GL_TEXTURE_2D, 0);
-    m_slotPool->releasePendingSlot(slotIndex);
+    m_slotPool->releaseReadingSlot(slotIndex);
+    if (m_presentationEvents) {
+        emit m_presentationEvents->publishCapacityAvailable();
+    }
 }
 
 void WinAngleTextureReader::detach()

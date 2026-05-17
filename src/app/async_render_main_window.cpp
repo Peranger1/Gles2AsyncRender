@@ -63,13 +63,15 @@ AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     connect(m_displayWidget, &TexturePresentWidget::outputSizeChanged,
             m_worker, &PhotoEditorAppSession::setOutputSize,
             Qt::QueuedConnection);
-    connect(m_displayWidget, &TexturePresentWidget::textureConsumed,
-            m_worker, &PhotoEditorAppSession::onTextureConsumed,
-            Qt::QueuedConnection);
+    if (m_renderBackend && m_renderBackend->presentationEvents()) {
+        connect(m_renderBackend->presentationEvents(), &PlatformPresentationEvents::textureReady,
+                m_displayWidget, &TexturePresentWidget::onTextureReady,
+                Qt::QueuedConnection);
+        connect(m_renderBackend->presentationEvents(), &PlatformPresentationEvents::warning,
+                this, &AsyncRenderMainWindow::onWorkerWarning,
+                Qt::QueuedConnection);
+    }
 
-    connect(m_worker, &PhotoEditorAppSession::textureReady,
-            m_displayWidget, &TexturePresentWidget::onTextureReady,
-            Qt::QueuedConnection);
     connect(m_worker, &PhotoEditorAppSession::initializationFailed,
             this, &AsyncRenderMainWindow::onWorkerError,
             Qt::QueuedConnection);
@@ -141,6 +143,13 @@ void AsyncRenderMainWindow::onDisplayReadyForWorker()
         logWindowMessage(QStringLiteral("Render worker initialization failed."));
         return;
     }
+
+    QMetaObject::invokeMethod(
+        m_worker,
+        "setOutputSize",
+        Qt::QueuedConnection,
+        Q_ARG(QSize, m_displayWidget->outputPixelSize()),
+        Q_ARG(quint64, m_displayWidget->outputRevision()));
 
     m_workerInitialized = true;
     pushEffectParameters();

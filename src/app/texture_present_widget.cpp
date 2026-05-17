@@ -1,6 +1,5 @@
 #include "texture_present_widget.h"
 
-#include "angle_threading.h"
 #include "runtime_diagnostics.h"
 
 #include <QOpenGLContext>
@@ -47,6 +46,11 @@ void logWidgetMessage(const QString &message)
 {
     RuntimeDiagnostics::logInfo("[TexturePresentWidget]", message);
 }
+
+bool isExpiredTicketError(const QString &message)
+{
+    return message.contains(QStringLiteral("no longer ready for reading"), Qt::CaseInsensitive);
+}
 }
 
 TexturePresentWidget::TexturePresentWidget(QWidget *parent)
@@ -81,8 +85,7 @@ void TexturePresentWidget::shutdown()
     }
 
     m_reader = nullptr;
-    m_pendingTicket = {};
-    m_hasPendingTicket = false;
+    m_pendingTickets.clear();
     m_displayTextureSize = QSize();
     m_displayContentSize = QSize();
     m_hasDisplayTexture = false;
@@ -95,10 +98,18 @@ QSize TexturePresentWidget::outputPixelSize() const
                  qMax(1, qRound(height() * dpr)));
 }
 
+quint64 TexturePresentWidget::outputRevision() const
+{
+    return m_outputRevision;
+}
+
 void TexturePresentWidget::onTextureReady(const TextureTicket &ticket)
 {
-    m_pendingTicket = ticket;
-    m_hasPendingTicket = true;
+    if (ticket.outputRevision != m_outputRevision) {
+        return;
+    }
+
+    m_pendingTickets.push_back(ticket);
     update();
 }
 
@@ -113,9 +124,6 @@ void TexturePresentWidget::initializeGL()
     gl->glDisable(GL_DEPTH_TEST);
     gl->glClearColor(0.05f, 0.06f, 0.08f, 1.0f);
 
-    const AngleThreadingInfo angleInfo = ensureAngleD3D11MultithreadProtection();
-    logWidgetMessage(angleInfo.message);
-
     QString error;
     if (!createProgram(&error)) {
         logWidgetMessage(error);
@@ -126,7 +134,6 @@ void TexturePresentWidget::initializeGL()
         return;
     }
 
-    emit outputSizeChanged(outputPixelSize());
     emit displayReady();
 }
 
@@ -134,7 +141,9 @@ void TexturePresentWidget::resizeGL(int width, int height)
 {
     Q_UNUSED(width);
     Q_UNUSED(height);
-    emit outputSizeChanged(outputPixelSize());
+    ++m_outputRevision;
+    m_pendingTickets.clear();
+    emit outputSizeChanged(outputPixelSize(), m_outputRevision);
 }
 
 void TexturePresentWidget::paintGL()
@@ -148,23 +157,32 @@ void TexturePresentWidget::paintGL()
     gl->glViewport(0, 0, viewportSize.width(), viewportSize.height());
     gl->glClear(GL_COLOR_BUFFER_BIT);
 
-    if (m_hasPendingTicket && m_reader) {
+    bool displayedTicket = false;
+    while (!m_pendingTickets.empty() && m_reader) {
+        const TextureTicket ticket = m_pendingTickets.front();
+        m_pendingTickets.pop_front();
         TextureLease lease;
         QString error;
-        if (m_reader->acquire(m_pendingTicket, &lease, &error)) {
+        if (m_reader->acquire(ticket, &lease, &error)) {
             if (copyLeaseToDisplayTexture(lease, &error)) {
                 m_displayContentSize = lease.size;
                 m_hasDisplayTexture = true;
+                displayedTicket = true;
             } else if (!error.isEmpty()) {
                 logWidgetMessage(error);
             }
             m_reader->release(lease);
-            emit textureConsumed();
-        } else if (!error.isEmpty()) {
-            logWidgetMessage(error);
+            break;
         }
 
-        m_hasPendingTicket = false;
+        if (!error.isEmpty() && !isExpiredTicketError(error)) {
+            logWidgetMessage(error);
+            break;
+        }
+    }
+
+    if (displayedTicket && !m_pendingTickets.empty()) {
+        update();
     }
 
     if (!m_hasDisplayTexture) {

@@ -1,12 +1,13 @@
 #pragma once
 
 #include "framework/platform/platform_backend.h"
-#include "win_angle_texture_writer.h"
+#include "framework/platform/presentation_events.h"
 
 #include <memory>
 
 class D3D11SharedTextureSlots;
 class WinAngleTextureReader;
+class WinAngleTextureWriter;
 
 class WinAnglePlatformBackend final : public IPlatformBackend
 {
@@ -17,9 +18,10 @@ public:
     std::unique_ptr<IRuntime> createRuntime() const override;
     IReader *reader() const override;
     IWriter *writer() const override;
+    PlatformPresentationEvents *presentationEvents() const override;
 
 private:
-    std::shared_ptr<WinAngleTextureWriter::RuntimeBindingState> m_runtimeBinding;
+    std::unique_ptr<PlatformPresentationEvents> m_presentationEvents;
     std::shared_ptr<D3D11SharedTextureSlots> m_slotPool;
     std::unique_ptr<WinAngleTextureReader> m_reader;
     std::unique_ptr<WinAngleTextureWriter> m_writer;

@@ -1,11 +1,12 @@
 #include "photo_editor_app_session.h"
 
-#include "framework/execution/execution_types.h"
 #include "framework/platform/platform_backend.h"
+#include "framework/execution/qt_runtime_host.h"
 #include "framework/platform/runtime.h"
 #include "framework/platform/writer.h"
 #include "photo_editor/photo_editor_cpu_renderer.h"
-#include "photo_editor/photo_editor_runtime_host.h"
+#include "photo_editor/photo_editor_result_types.h"
+#include "framework/platform/presentation_events.h"
 #include "runtime_diagnostics.h"
 
 #include <QDir>
@@ -127,7 +128,7 @@ bool PhotoEditorAppSession::initialize(IPlatformBackend *backend, QSize outputSi
     }
 
     std::unique_ptr<IRuntime> runtime = backend->createRuntime();
-    auto runtimeHost = std::make_unique<PhotoEditorRuntimeHost>(std::move(runtime));
+    auto runtimeHost = std::make_unique<QtRuntimeHost>(std::move(runtime));
     QString error;
     if (!runtimeHost->start(&error)) {
         emit initializationFailed(error.isEmpty()
@@ -143,7 +144,7 @@ bool PhotoEditorAppSession::initialize(IPlatformBackend *backend, QSize outputSi
         LaneConfig { QStringLiteral("photo_editor.preview.gpu"),
                      QueuePolicyKind::MergeWhileBusy,
                      DeliveryPolicyKind::DeliverEveryStartedResult,
-                     1 },
+                     3 },
         [this, gpuSessionPtr = gpuSession.get()](const TaskContext &context,
                                                  const PhotoEditorGpuPreviewArgs &args,
                                                  AsyncLane<PhotoEditorGpuPreviewArgs, RawGpuTextureResult>::Done done) {
@@ -156,27 +157,32 @@ bool PhotoEditorAppSession::initialize(IPlatformBackend *backend, QSize outputSi
     m_invoker = std::move(invoker);
     m_gpuSession = std::move(gpuSession);
     m_gpuPreviewLane = std::move(previewLane);
+    if (m_backend && m_backend->writer() && m_backend->presentationEvents()) {
+        m_backend->writer()->attach(m_runtimeHost.get(), m_runtimeHost->runtime(), m_backend->presentationEvents());
+    }
     m_outputSize = sanitizedSize(outputSize);
+    m_outputRevision = 0;
     m_initialized = true;
     m_shuttingDown = false;
-    m_hasPendingGpuPublish = false;
-    m_pendingGpuRuntime = nullptr;
     logSessionMessage(QStringLiteral("Initialized. App session now owns the runtime host and preview lane."));
     return true;
 }
 
-void PhotoEditorAppSession::setOutputSize(QSize size)
+void PhotoEditorAppSession::setOutputSize(QSize size, quint64 outputRevision)
 {
     if (m_shuttingDown) {
         return;
     }
 
     const QSize safeSize = sanitizedSize(size);
-    if (m_outputSize == safeSize) {
+    const bool sizeChanged = m_outputSize != safeSize;
+    const bool revisionChanged = m_outputRevision != outputRevision;
+    if (!sizeChanged && !revisionChanged) {
         return;
     }
 
     m_outputSize = safeSize;
+    m_outputRevision = outputRevision;
     if (m_initialized && m_catalog->hasImage()) {
         submitGpuPreview();
     }
@@ -270,19 +276,6 @@ void PhotoEditorAppSession::requestCpuPreview()
     }
 }
 
-void PhotoEditorAppSession::onTextureConsumed()
-{
-    if (m_shuttingDown || !m_hasPendingGpuPublish) {
-        return;
-    }
-
-    if (tryPublishGpuResult(m_pendingGpuPublish, m_pendingGpuRuntime) == GpuPublishDisposition::Published) {
-        m_hasPendingGpuPublish = false;
-        m_pendingGpuPublish = {};
-        m_pendingGpuRuntime = nullptr;
-    }
-}
-
 void PhotoEditorAppSession::shutdown()
 {
     if (m_shuttingDown) {
@@ -291,9 +284,6 @@ void PhotoEditorAppSession::shutdown()
 
     m_shuttingDown = true;
     m_initialized = false;
-    m_hasPendingGpuPublish = false;
-    m_pendingGpuPublish = {};
-    m_pendingGpuRuntime = nullptr;
 
     if (m_gpuPreviewLane) {
         m_gpuPreviewLane->shutdown();
@@ -423,43 +413,9 @@ void PhotoEditorAppSession::handleGpuPreviewCompleted(TaskId taskId,
     }
 
     const RawGpuTextureResult &gpuResult = outcome.value();
-    const GpuPublishDisposition disposition = tryPublishGpuResult(gpuResult, m_runtimeHost->runtime());
-    if (disposition == GpuPublishDisposition::RetryLater) {
-        m_pendingGpuPublish = gpuResult;
-        m_pendingGpuRuntime = m_runtimeHost->runtime();
-        m_hasPendingGpuPublish = true;
-    }
-}
-
-PhotoEditorAppSession::GpuPublishDisposition PhotoEditorAppSession::tryPublishGpuResult(
-    const RawGpuTextureResult &gpuResult,
-    IRuntime *sourceRuntime)
-{
-    if (m_backend == nullptr || m_backend->writer() == nullptr) {
-        return GpuPublishDisposition::Failed;
-    }
-
-    if (sourceRuntime == nullptr) {
-        emit requestWarning(QStringLiteral("The GPU result cannot be published because the execution context runtime is unavailable."));
-        return GpuPublishDisposition::Failed;
-    }
-
-    if (m_runtimeHost && sourceRuntime != m_runtimeHost->runtime()) {
-        emit requestWarning(QStringLiteral("The GPU result runtime does not match the app session runtime."));
-        return GpuPublishDisposition::Failed;
-    }
-
     QString error;
-    TextureTicket ticket;
-    const bool ok = m_backend->writer()->publishTexture(gpuResult.textureId, gpuResult.size, &ticket, &error);
-    if (ok) {
-        emit textureReady(ticket);
-        return GpuPublishDisposition::Published;
-    }
-
-    if (!error.isEmpty()) {
+    if (!m_backend->writer()->submitTexture(gpuResult.textureId, gpuResult.size, m_outputRevision, &error)
+        && !error.isEmpty()) {
         emit requestWarning(error);
-        return GpuPublishDisposition::Failed;
     }
-    return GpuPublishDisposition::RetryLater;
 }

@@ -4,6 +4,7 @@
 
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
+#include <deque>
 
 class TexturePresentWidget final : public QOpenGLWidget
 {
@@ -15,12 +16,12 @@ public:
 
     void setReader(IReader *reader);
     QSize outputPixelSize() const;
+    quint64 outputRevision() const;
     void shutdown();
 
 signals:
     void displayReady();
-    void outputSizeChanged(QSize size);
-    void textureConsumed();
+    void outputSizeChanged(QSize size, quint64 outputRevision);
 
 public slots:
     void onTextureReady(const TextureTicket &ticket);
@@ -45,7 +46,7 @@ private:
     GLuint m_displayFramebufferId = 0U;
     QSize m_displayTextureSize;
     QSize m_displayContentSize;
-    TextureTicket m_pendingTicket;
-    bool m_hasPendingTicket = false;
+    quint64 m_outputRevision = 0;
+    std::deque<TextureTicket> m_pendingTickets;
     bool m_hasDisplayTexture = false;
 };

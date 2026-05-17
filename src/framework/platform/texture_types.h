@@ -11,6 +11,7 @@ struct TextureTicket final
     int slotIndex = -1;
     quint64 generation = 0;
     quint64 frameIndex = 0;
+    quint64 outputRevision = 0;
     QSize size;
 };
 

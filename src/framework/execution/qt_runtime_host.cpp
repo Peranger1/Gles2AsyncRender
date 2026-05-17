@@ -1,29 +1,29 @@
-#include "photo_editor_runtime_host.h"
+#include "qt_runtime_host.h"
 
 #include "framework/platform/runtime.h"
 
 #include <QMetaObject>
 #include <QThread>
 
-PhotoEditorRuntimeHost::PhotoEditorRuntimeHost(std::unique_ptr<IRuntime> runtime, QObject *parent)
+QtRuntimeHost::QtRuntimeHost(std::unique_ptr<IRuntime> runtime, QObject *parent)
     : QObject(parent)
     , m_runtime(std::move(runtime))
 {
 }
 
-PhotoEditorRuntimeHost::~PhotoEditorRuntimeHost()
+QtRuntimeHost::~QtRuntimeHost()
 {
     shutdown();
 }
 
-bool PhotoEditorRuntimeHost::start(QString *error)
+bool QtRuntimeHost::start(QString *error)
 {
     if (m_started) {
         return true;
     }
     if (!m_runtime) {
         if (error) {
-            *error = QStringLiteral("PhotoEditorRuntimeHost requires a valid runtime.");
+            *error = QStringLiteral("QtRuntimeHost requires a valid runtime.");
         }
         return false;
     }
@@ -35,7 +35,7 @@ bool PhotoEditorRuntimeHost::start(QString *error)
     return true;
 }
 
-void PhotoEditorRuntimeHost::shutdown()
+void QtRuntimeHost::shutdown()
 {
     if (m_shuttingDown) {
         return;
@@ -47,21 +47,21 @@ void PhotoEditorRuntimeHost::shutdown()
     m_started = false;
 }
 
-IRuntime *PhotoEditorRuntimeHost::runtime() const
+IRuntime *QtRuntimeHost::runtime() const
 {
     return m_runtime.get();
 }
 
-bool PhotoEditorRuntimeHost::isOnRuntimeThread() const
+bool QtRuntimeHost::isOnRuntimeThread() const
 {
     return QThread::currentThread() == thread();
 }
 
-bool PhotoEditorRuntimeHost::dispatchAsync(RuntimeClosure closure, QString *error)
+bool QtRuntimeHost::dispatchAsync(RuntimeClosure closure, QString *error)
 {
     if (!m_started || !m_runtime || !closure) {
         if (error) {
-            *error = QStringLiteral("PhotoEditorRuntimeHost cannot dispatch an async closure.");
+            *error = QStringLiteral("QtRuntimeHost cannot dispatch an async closure.");
         }
         return false;
     }
@@ -76,11 +76,11 @@ bool PhotoEditorRuntimeHost::dispatchAsync(RuntimeClosure closure, QString *erro
     }, Qt::QueuedConnection);
 }
 
-bool PhotoEditorRuntimeHost::dispatchSync(RuntimeClosure closure, QString *error)
+bool QtRuntimeHost::dispatchSync(RuntimeClosure closure, QString *error)
 {
     if (!m_started || !m_runtime || !closure) {
         if (error) {
-            *error = QStringLiteral("PhotoEditorRuntimeHost cannot dispatch a sync closure.");
+            *error = QStringLiteral("QtRuntimeHost cannot dispatch a sync closure.");
         }
         return false;
     }

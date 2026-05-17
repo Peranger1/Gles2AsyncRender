@@ -8,14 +8,14 @@
 
 class IRuntime;
 
-class PhotoEditorRuntimeHost final : public QObject, public RuntimeHost
+class QtRuntimeHost final : public QObject, public RuntimeHost
 {
     Q_OBJECT
 
 public:
-    explicit PhotoEditorRuntimeHost(std::unique_ptr<IRuntime> runtime,
-                                    QObject *parent = nullptr);
-    ~PhotoEditorRuntimeHost() override;
+    explicit QtRuntimeHost(std::unique_ptr<IRuntime> runtime,
+                           QObject *parent = nullptr);
+    ~QtRuntimeHost() override;
 
     bool start(QString *error) override;
     void shutdown() override;

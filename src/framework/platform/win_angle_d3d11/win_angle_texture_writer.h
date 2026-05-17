@@ -5,24 +5,19 @@
 #include <memory>
 
 class D3D11SharedTextureSlots;
-class WinAngleRuntime;
 
 class WinAngleTextureWriter final : public IWriter
 {
 public:
-    struct RuntimeBindingState final
-    {
-        WinAngleRuntime *runtime = nullptr;
-    };
-
-    WinAngleTextureWriter(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool,
-                          const std::shared_ptr<RuntimeBindingState> &runtimeBinding);
+    explicit WinAngleTextureWriter(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool);
     ~WinAngleTextureWriter() override;
 
-    bool publishTexture(GLuint sourceTextureId,
-                        const QSize &size,
-                        TextureTicket *ticket,
-                        QString *error) override;
+    void attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events) override;
+    bool submitTexture(GLuint sourceTextureId,
+                       const QSize &size,
+                       quint64 outputRevision,
+                       QString *error) override;
+    void notifyPresentationCapacityAvailable() override;
     void reset() override;
 
 private:

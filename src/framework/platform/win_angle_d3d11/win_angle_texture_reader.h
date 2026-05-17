@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 
 class D3D11SharedTextureSlots;
+class PlatformPresentationEvents;
 class QOpenGLContext;
 class QOpenGLFunctions;
 
@@ -23,7 +24,8 @@ struct ResolvedEglApi;
 class WinAngleTextureReader final : public IReader
 {
 public:
-    explicit WinAngleTextureReader(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool);
+    WinAngleTextureReader(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool,
+                          PlatformPresentationEvents *presentationEvents);
     ~WinAngleTextureReader() override;
 
     bool attachToCurrentContext(QString *error) override;
@@ -47,6 +49,7 @@ private:
     void destroyImportedSlot(int slotIndex);
 
     std::shared_ptr<D3D11SharedTextureSlots> m_slotPool;
+    PlatformPresentationEvents *m_presentationEvents = nullptr;
     QOpenGLContext *m_context = nullptr;
     QOpenGLFunctions *m_gl = nullptr;
     std::unique_ptr<QtAngleEglTools::ResolvedEglApi> m_ownedEglApi;

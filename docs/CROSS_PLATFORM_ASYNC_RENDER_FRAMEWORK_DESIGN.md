@@ -1,5 +1,14 @@
 # 跨平台异步渲染框架设计方案
 
+> 历史文档 / 非当前正式架构说明
+>
+> 当前框架的正式文档只包括：
+>
+> - [README.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/README.md)
+> - [ARCHITECTURE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/ARCHITECTURE.md)
+>
+> 本文档保留为历史方案和跨平台设计背景材料。若本文内容与当前代码、`README.md`、`ARCHITECTURE.md` 不一致，一律以当前代码、`README.md`、`ARCHITECTURE.md` 为准。
+
 > 日期：2026-05-15
 >
 > 状态：Proposed
@@ -12,9 +21,20 @@
 > - 当前代码已经进一步收敛为 `framework/platform + framework/execution + app` 三层结构
 > - 当前实现状态请优先参考：
 >   - [ARCHITECTURE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/ARCHITECTURE.md)
->   - [docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md)
+>   - [README.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/README.md)
 >
 > 因此，本文中关于 `framework/core`、`framework/qt`、`FrameTicket`、`SerialConflatedLane` 等章节，应理解为“上一轮总体方案讨论”，不等同于当前代码的最终目录与命名。
+>
+> 当前代码与本文若干设计假设已经存在以下差异：
+>
+> - GPU 预览主路径已经不是 “latest-only + 单 pending”
+> - `AsyncLane` 当前主配置为 `MergeWhileBusy + DeliverEveryStartedResult`
+> - waiting 区会先保留多个 checkpoint，再对队尾请求做 merge
+> - Windows 共享纹理槽当前维护多 `Ready` 队列，而不是单 pending 槽
+> - `TextureTicket` 当前额外携带 `outputRevision`，用于隔离 resize 前后的结果
+> - 当前平台发布合同已经是 `submitTexture() + drainPendingPublishes() + pendingPublishState()`
+> - 当前 publish capacity 事件来自平台 reader release，而不是 widget 信号
+> - 当前 `RuntimeHost` 的 Qt 默认实现已经收敛为 `src/framework/execution/qt_runtime_host.*`
 
 ## 1. 背景
 
@@ -554,6 +574,18 @@ public:
     virtual void release(const FrameReadLease &lease) = 0;
 };
 ```
+
+上面这组 `IFrameWriter / IFrameReader` 接口是历史抽象草案，不代表当前代码。
+
+当前实现的对应关系是：
+
+- 历史 `IFrameWriter` 大致对应当前 `framework/platform/IWriter`
+- 但当前 `IWriter` 已经不是单个 `publishTexture(...) -> bool` 合同
+- 当前代码采用：
+  - `submitTexture(...) -> PublishResult`
+  - `drainPendingPublishes() -> PublishDrainResult`
+  - `pendingPublishState() -> PendingPublishState`
+- 当前 publish capacity 也不是由 Qt presenter 直接驱动，而是由 reader release 后的 platform event 触发
 
 其中：
 

@@ -1,8 +1,8 @@
 #pragma once
 
 #include "framework/execution/execution_common.h"
-#include "framework/execution/execution_types.h"
 #include "photo_editor_render_args.h"
+#include "photo_editor_result_types.h"
 
 class PhotoEditorCpuRenderer final
 {
