@@ -24,6 +24,13 @@ WinAnglePlatformBackend::WinAnglePlatformBackend(int slotCount)
 
 WinAnglePlatformBackend::~WinAnglePlatformBackend() = default;
 
+bool WinAnglePlatformBackend::preparePresentationContext(const PresentationContext &context, QString *error)
+{
+    Q_UNUSED(context);
+    Q_UNUSED(error);
+    return true;
+}
+
 std::unique_ptr<IRuntime> WinAnglePlatformBackend::createRuntime() const
 {
     return std::make_unique<WinAngleRuntime>();

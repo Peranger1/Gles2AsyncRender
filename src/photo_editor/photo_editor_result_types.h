@@ -1,12 +1,12 @@
 #pragma once
 
+#include "framework/platform/gl_types.h"
+
 #include <QImage>
 #include <QMap>
 #include <QSize>
 #include <QString>
 #include <QVariant>
-
-#include <QtANGLE/GLES2/gl2.h>
 
 struct RawGpuTextureResult final
 {

@@ -1,10 +1,10 @@
 #pragma once
 
+#include "gl_types.h"
+
 #include <QMetaType>
 #include <QSize>
 #include <QtGlobal>
-
-#include <QtANGLE/GLES2/gl2.h>
 
 struct TextureTicket final
 {
@@ -18,6 +18,7 @@ struct TextureTicket final
 struct TextureLease final
 {
     GLuint textureId = 0U;
+    GLenum textureTarget = GL_TEXTURE_2D;
     QSize size;
 };
 

@@ -15,6 +15,7 @@ public:
     explicit WinAnglePlatformBackend(int slotCount = 3);
     ~WinAnglePlatformBackend() override;
 
+    bool preparePresentationContext(const PresentationContext &context, QString *error) override;
     std::unique_ptr<IRuntime> createRuntime() const override;
     IReader *reader() const override;
     IWriter *writer() const override;

@@ -105,6 +105,7 @@ bool WinAngleTextureReader::acquire(const TextureTicket &ticket, TextureLease *l
 
     slot.boundForRead = true;
     lease->textureId = slot.textureId;
+    lease->textureTarget = GL_TEXTURE_2D;
     lease->size = ticket.size;
     return true;
 }

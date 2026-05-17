@@ -41,12 +41,26 @@
   - `win_angle_texture_writer.*`
   - `d3d11_shared_texture_slots.h`
 
+- macOS Cocoa OpenGL + IOSurface 实现
+  - `mac_cocoa_gl_platform_backend.*`
+  - `mac_cocoa_gl_runtime.*`
+  - `mac_cocoa_gl_texture_reader.*`
+  - `mac_cocoa_gl_texture_writer.*`
+  - `mac_iosurface_texture_slots.h`
+
 - 辅助实现仍保留在 `src/framework/backend/win_angle_d3d11`
   - `qt_angle_egl_tools.*`
   - `gles2_proc_table.*`
   - `gles2_shader_utils.*`
 
 平台层只负责 runtime、纹理导入、纹理发布，以及 backend 组装；不负责 Qt widget 或 demo 业务。
+
+当前跨平台设计约束是：
+
+- worker runtime 必须独立于 UI `QOpenGLContext`
+- UI 与 worker 不共享 GL 对象
+- 平台层负责把 worker 纹理发布到平台私有交换介质
+- UI 侧始终通过 `TextureTicket` / `TextureLease` 消费结果
 
 ### `src/framework/execution`
 
@@ -194,9 +208,16 @@ GPU 结果在 app 的 `handleGpuPreviewCompleted()` 中调用 `IWriter` 转成 `
 
 - runtime
   - `WinAngleRuntime`
+  - `MacCocoaGlRuntime`
   - 由 `QtRuntimeHost` 管理进入/退出
 
 `PhotoEditorGpuSession` 只在 runtime 上下文内触碰 `photo_editor_*` 和 GLES2 资源；`PhotoEditorAppSession` 只负责业务编排和发起发布，不再负责平台补发链路。
+
+当前状态补充：
+
+- Windows 主链路已验证
+- macOS `framework/platform` 已按独立 context + `IOSurface` slot 方向实现
+- macOS 业务可运行性仍取决于 `photo_editor_gles2_backend` 从 Windows/ANGLE 假设中继续解耦
 
 当前 resize 相关边界是：
 

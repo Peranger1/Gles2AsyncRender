@@ -3,7 +3,8 @@
 #include "app/photo_editor_app_session.h"
 #include "app/texture_present_widget.h"
 #include "framework/platform/platform_backend.h"
-#include "framework/platform/win_angle_d3d11/win_angle_platform_backend.h"
+#include "framework/platform/platform_backend_factory.h"
+#include "framework/platform/presentation_events.h"
 #include "runtime_diagnostics.h"
 
 #include <QAction>
@@ -24,6 +25,7 @@
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QOpenGLContext>
 #include <QtMath>
 
 namespace
@@ -42,7 +44,7 @@ void logWindowDiag(const QString &message)
 AsyncRenderMainWindow::AsyncRenderMainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_displayWidget(new TexturePresentWidget(this))
-    , m_renderBackend(std::make_unique<WinAnglePlatformBackend>(3))
+    , m_renderBackend(createDefaultPlatformBackend(3))
     , m_worker(new PhotoEditorAppSession())
 {
     setWindowTitle(QStringLiteral("Gles2AsyncRender"));
@@ -129,6 +131,22 @@ void AsyncRenderMainWindow::onDisplayReadyForWorker()
     }
 
     m_workerInitAttempted = true;
+
+    QString prepareError;
+    m_displayWidget->makeCurrent();
+    PresentationContext presentationContext;
+    presentationContext.screen = m_displayWidget->screen();
+    presentationContext.format = m_displayWidget->context()
+        ? m_displayWidget->context()->format()
+        : m_displayWidget->format();
+    const bool presentationPrepared = m_renderBackend->preparePresentationContext(presentationContext, &prepareError);
+    m_displayWidget->doneCurrent();
+    if (!presentationPrepared) {
+        logWindowMessage(prepareError.isEmpty()
+                             ? QStringLiteral("Render backend failed to prepare the presentation context.")
+                             : prepareError);
+        return;
+    }
 
     bool initialized = false;
     const bool invoked = QMetaObject::invokeMethod(

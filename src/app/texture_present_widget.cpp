@@ -125,7 +125,7 @@ void TexturePresentWidget::initializeGL()
     gl->glClearColor(0.05f, 0.06f, 0.08f, 1.0f);
 
     QString error;
-    if (!createProgram(&error)) {
+    if (!createPrograms(&error)) {
         logWidgetMessage(error);
         return;
     }
@@ -189,23 +189,23 @@ void TexturePresentWidget::paintGL()
         return;
     }
 
-    m_program.bind();
+    m_program2D.bind();
     gl->glActiveTexture(GL_TEXTURE0);
     gl->glBindTexture(GL_TEXTURE_2D, m_displayTextureId);
-    gl->glUniform1i(m_samplerLocation, 0);
+    gl->glUniform1i(m_samplerLocation2D, 0);
     const std::array<GLfloat, 8> vertices = aspectFitVertices(m_displayContentSize, viewportSize);
-    gl->glVertexAttribPointer(m_positionLocation, 2, GL_FLOAT, GL_FALSE, 0, vertices.data());
-    gl->glEnableVertexAttribArray(m_positionLocation);
-    gl->glVertexAttribPointer(m_texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, kDisplayTexCoords);
-    gl->glEnableVertexAttribArray(m_texCoordLocation);
+    gl->glVertexAttribPointer(m_positionLocation2D, 2, GL_FLOAT, GL_FALSE, 0, vertices.data());
+    gl->glEnableVertexAttribArray(m_positionLocation2D);
+    gl->glVertexAttribPointer(m_texCoordLocation2D, 2, GL_FLOAT, GL_FALSE, 0, kDisplayTexCoords);
+    gl->glEnableVertexAttribArray(m_texCoordLocation2D);
     gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    gl->glDisableVertexAttribArray(m_positionLocation);
-    gl->glDisableVertexAttribArray(m_texCoordLocation);
+    gl->glDisableVertexAttribArray(m_positionLocation2D);
+    gl->glDisableVertexAttribArray(m_texCoordLocation2D);
     gl->glBindTexture(GL_TEXTURE_2D, 0);
-    m_program.release();
+    m_program2D.release();
 }
 
-bool TexturePresentWidget::createProgram(QString *error)
+bool TexturePresentWidget::createPrograms(QString *error)
 {
     static const char *vertexShader = R"(
         attribute highp vec2 aPosition;
@@ -219,7 +219,7 @@ bool TexturePresentWidget::createProgram(QString *error)
         }
     )";
 
-    static const char *fragmentShader = R"(
+    static const char *fragmentShader2D = R"(
         varying mediump vec2 vTexCoord;
         uniform sampler2D uTexture;
 
@@ -229,31 +229,84 @@ bool TexturePresentWidget::createProgram(QString *error)
         }
     )";
 
-    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)) {
+    static const char *fragmentShaderRect = R"(
+        #extension GL_ARB_texture_rectangle : enable
+        varying mediump vec2 vTexCoord;
+        uniform sampler2DRect uTexture;
+
+        void main()
+        {
+            gl_FragColor = texture2DRect(uTexture, vTexCoord);
+        }
+    )";
+
+    if (!m_program2D.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)) {
         if (error) {
-            *error = m_program.log();
+            *error = m_program2D.log();
         }
         return false;
     }
 
-    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader)) {
+    if (!m_program2D.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader2D)) {
         if (error) {
-            *error = m_program.log();
+            *error = m_program2D.log();
         }
         return false;
     }
 
-    if (!m_program.link()) {
+    if (!m_program2D.link()) {
         if (error) {
-            *error = m_program.log();
+            *error = m_program2D.log();
         }
         return false;
     }
 
-    m_positionLocation = m_program.attributeLocation("aPosition");
-    m_texCoordLocation = m_program.attributeLocation("aTexCoord");
-    m_samplerLocation = m_program.uniformLocation("uTexture");
-    return m_positionLocation >= 0 && m_texCoordLocation >= 0 && m_samplerLocation >= 0;
+    m_positionLocation2D = m_program2D.attributeLocation("aPosition");
+    m_texCoordLocation2D = m_program2D.attributeLocation("aTexCoord");
+    m_samplerLocation2D = m_program2D.uniformLocation("uTexture");
+    if (m_positionLocation2D < 0 || m_texCoordLocation2D < 0 || m_samplerLocation2D < 0) {
+        if (error) {
+            *error = QStringLiteral("The 2D display shader program is missing required attributes or uniforms.");
+        }
+        return false;
+    }
+
+    m_rectSamplingSupported = false;
+    if (context() && context()->format().renderableType() != QSurfaceFormat::OpenGLES) {
+        if (!m_programRect.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)) {
+            if (error) {
+                *error = m_programRect.log();
+            }
+            return false;
+        }
+
+        if (!m_programRect.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShaderRect)) {
+            if (error) {
+                *error = m_programRect.log();
+            }
+            return false;
+        }
+
+        if (!m_programRect.link()) {
+            if (error) {
+                *error = m_programRect.log();
+            }
+            return false;
+        }
+
+        m_positionLocationRect = m_programRect.attributeLocation("aPosition");
+        m_texCoordLocationRect = m_programRect.attributeLocation("aTexCoord");
+        m_samplerLocationRect = m_programRect.uniformLocation("uTexture");
+        m_rectSamplingSupported = m_positionLocationRect >= 0 && m_texCoordLocationRect >= 0 && m_samplerLocationRect >= 0;
+        if (!m_rectSamplingSupported) {
+            if (error) {
+                *error = QStringLiteral("The rectangle-texture display shader program is missing required attributes or uniforms.");
+            }
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool TexturePresentWidget::ensureDisplayTarget(const QSize &size, QString *error)
@@ -326,21 +379,53 @@ bool TexturePresentWidget::copyLeaseToDisplayTexture(const TextureLease &lease, 
         1.0f, 0.0f
     };
 
+    const bool isRectTarget = lease.textureTarget == GL_TEXTURE_RECTANGLE_ARB;
+    if (isRectTarget && !m_rectSamplingSupported) {
+        if (error) {
+            *error = QStringLiteral("The current display context does not support rectangle-texture sampling.");
+        }
+        return false;
+    }
+    GLfloat importedTexCoords[8] = {
+        kImportedTexCoords[0], kImportedTexCoords[1],
+        kImportedTexCoords[2], kImportedTexCoords[3],
+        kImportedTexCoords[4], kImportedTexCoords[5],
+        kImportedTexCoords[6], kImportedTexCoords[7]
+    };
+    QOpenGLShaderProgram *program = &m_program2D;
+    int positionLocation = m_positionLocation2D;
+    int texCoordLocation = m_texCoordLocation2D;
+    int samplerLocation = m_samplerLocation2D;
+    if (isRectTarget) {
+        importedTexCoords[0] = 0.0f;
+        importedTexCoords[1] = GLfloat(lease.size.height());
+        importedTexCoords[2] = GLfloat(lease.size.width());
+        importedTexCoords[3] = GLfloat(lease.size.height());
+        importedTexCoords[4] = 0.0f;
+        importedTexCoords[5] = 0.0f;
+        importedTexCoords[6] = GLfloat(lease.size.width());
+        importedTexCoords[7] = 0.0f;
+        program = &m_programRect;
+        positionLocation = m_positionLocationRect;
+        texCoordLocation = m_texCoordLocationRect;
+        samplerLocation = m_samplerLocationRect;
+    }
+
     gl->glBindFramebuffer(GL_FRAMEBUFFER, m_displayFramebufferId);
     gl->glViewport(0, 0, lease.size.width(), lease.size.height());
-    m_program.bind();
+    program->bind();
     gl->glActiveTexture(GL_TEXTURE0);
-    gl->glBindTexture(GL_TEXTURE_2D, lease.textureId);
-    gl->glUniform1i(m_samplerLocation, 0);
-    gl->glVertexAttribPointer(m_positionLocation, 2, GL_FLOAT, GL_FALSE, 0, kVertices);
-    gl->glEnableVertexAttribArray(m_positionLocation);
-    gl->glVertexAttribPointer(m_texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, kImportedTexCoords);
-    gl->glEnableVertexAttribArray(m_texCoordLocation);
+    gl->glBindTexture(lease.textureTarget, lease.textureId);
+    gl->glUniform1i(samplerLocation, 0);
+    gl->glVertexAttribPointer(positionLocation, 2, GL_FLOAT, GL_FALSE, 0, kVertices);
+    gl->glEnableVertexAttribArray(positionLocation);
+    gl->glVertexAttribPointer(texCoordLocation, 2, GL_FLOAT, GL_FALSE, 0, importedTexCoords);
+    gl->glEnableVertexAttribArray(texCoordLocation);
     gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    gl->glDisableVertexAttribArray(m_positionLocation);
-    gl->glDisableVertexAttribArray(m_texCoordLocation);
-    gl->glBindTexture(GL_TEXTURE_2D, 0);
-    m_program.release();
+    gl->glDisableVertexAttribArray(positionLocation);
+    gl->glDisableVertexAttribArray(texCoordLocation);
+    gl->glBindTexture(lease.textureTarget, 0);
+    program->release();
     gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
     gl->glFlush();
 

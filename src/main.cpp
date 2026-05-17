@@ -9,13 +9,21 @@
 
 int main(int argc, char *argv[])
 {
+#if defined(Q_OS_WIN)
     QCoreApplication::setAttribute(Qt::AA_UseOpenGLES);
+#endif
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
     QSurfaceFormat format;
+#if defined(Q_OS_WIN)
     format.setRenderableType(QSurfaceFormat::OpenGLES);
     format.setVersion(2, 0);
     format.setProfile(QSurfaceFormat::NoProfile);
+#else
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(2, 1);
+    format.setProfile(QSurfaceFormat::NoProfile);
+#endif
     format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     format.setDepthBufferSize(0);
     format.setStencilBufferSize(0);

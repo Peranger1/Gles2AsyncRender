@@ -1,16 +1,23 @@
 # Gles2AsyncRender
 
-这是一个面向 `Qt 5.15.1 + QOpenGLWidget + ANGLE/GLES2 + D3D11 shared texture` 的异步图像处理工程。
+这是一个面向 `Qt 5.15.1 + QOpenGLWidget + 平台私有共享纹理交换` 的异步图像处理工程。
 
 当前主实现聚焦 Windows，已经验证以下主链路：
 
 - UI 侧固定使用 `QOpenGLWidget`
-- worker 侧使用独立 ANGLE runtime
-- GPU 结果通过 D3D11 shared texture 发布
+- worker 侧使用独立 runtime
+- GPU 结果通过平台私有共享纹理发布
 - UI 侧导入共享纹理并复制到本地显示纹理
 - 执行层同时支持 GPU 异步结果和 CPU 同步结果
 
-macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
+当前仓库已经补入 macOS 平台 backend 骨架，设计方向与 Windows 保持一致：
+
+- worker 侧创建独立 `QOpenGLContext`
+- UI / worker 不共享 GL 对象
+- 平台层通过 `IOSurface` slot 交换纹理
+- UI 侧仍只消费 `TextureTicket` / `TextureLease`
+
+但当前 `photo_editor_gles2_backend` 仍主要绑定 Windows/ANGLE 假设，因此 macOS 端目前完成的是 `framework/platform` 交换链路，不是完整业务可运行态。
 
 ## 当前能力
 
@@ -40,7 +47,9 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
   - `IReader`
   - `IWriter`
   - `IPlatformBackend`
+  - `platform_backend_factory`
   - Windows ANGLE D3D11 平台实现
+  - macOS Cocoa OpenGL + `IOSurface` 平台实现
 
 - `framework/execution`
   - `ExecutionOutcome`
@@ -117,6 +126,10 @@ macOS 方向目前仍保留在设计文档中，不在本仓库主实现内。
 
 - [src/framework/platform/win_angle_d3d11/win_angle_texture_reader.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_texture_reader.cpp)
   - UI 侧导入共享纹理并生成 `TextureLease`
+
+- [src/framework/platform/mac_cocoa_gl/mac_cocoa_gl_platform_backend.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/mac_cocoa_gl/mac_cocoa_gl_platform_backend.cpp)
+  - macOS 平台 backend 装配
+  - worker 独立 `QOpenGLContext` + `IOSurface` slot 交换链路
 
 - [src/photo_editor/photo_editor_gles2_backend.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_gles2_backend.cpp)
   - 底层 GLES2 photo editor backend

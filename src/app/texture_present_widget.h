@@ -32,16 +32,21 @@ protected:
     void paintGL() override;
 
 private:
-    bool createProgram(QString *error);
+    bool createPrograms(QString *error);
     bool ensureDisplayTarget(const QSize &size, QString *error);
     bool copyLeaseToDisplayTexture(const TextureLease &lease, QString *error);
     void destroyDisplayTarget();
 
     IReader *m_reader = nullptr;
-    QOpenGLShaderProgram m_program;
-    int m_positionLocation = -1;
-    int m_texCoordLocation = -1;
-    int m_samplerLocation = -1;
+    QOpenGLShaderProgram m_program2D;
+    QOpenGLShaderProgram m_programRect;
+    int m_positionLocation2D = -1;
+    int m_texCoordLocation2D = -1;
+    int m_samplerLocation2D = -1;
+    int m_positionLocationRect = -1;
+    int m_texCoordLocationRect = -1;
+    int m_samplerLocationRect = -1;
+    bool m_rectSamplingSupported = false;
     GLuint m_displayTextureId = 0U;
     GLuint m_displayFramebufferId = 0U;
     QSize m_displayTextureSize;
