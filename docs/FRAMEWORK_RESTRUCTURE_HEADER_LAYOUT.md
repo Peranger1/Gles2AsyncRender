@@ -37,7 +37,7 @@
 截至当前代码版本，以下目标已经完成：
 
 - `framework/platform` 公共合同与 Windows ANGLE D3D11 实现已落地
-- `framework/execution` 已落地，当前主路径为 `RuntimeHost + QtRuntimeHost + RuntimeInvoker + AsyncLane + SyncLane`
+- `framework/execution` 已落地，当前主路径为 `RuntimeHost + QtRuntimeHost + AsyncLane<Args, Result, QueuePolicy, DeliveryPolicy, WaitingMerger> + SyncLane`
 - `app/texture_present_widget.*`、`photo_editor_demo_*`、`photo_editor_app_session.*` 已落地
 - 旧 `framework/core`、`framework/qt`、旧 photo editor processor/session 链路已删除
 - `WinAngleRuntime` 已不再依赖旧 `angle_standalone_runtime.*`
@@ -111,9 +111,7 @@ src/
     photo_editor_app_session.h
     async_render_main_window.h
   photo_editor/
-    photo_editor_render_args.h
-    photo_editor_gpu_session.h
-    photo_editor_cpu_renderer.h
+    photo_editor_result_types.h
     photo_editor_gles2_backend.h
 ```
 

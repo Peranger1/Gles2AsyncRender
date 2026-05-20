@@ -12,8 +12,6 @@ win32:LIBS += d3d11.lib dxgi.lib d3dcompiler.lib ole32.lib
 
 SOURCES += \
     src/app/photo_editor_app_session.cpp \
-    src/photo_editor/photo_editor_cpu_renderer.cpp \
-    src/photo_editor/photo_editor_gpu_session.cpp \
     src/app/texture_present_widget.cpp \
     src/app/async_render_main_window.cpp \
     src/framework/backend/win_angle_d3d11/gles2_proc_table.cpp \
@@ -27,9 +25,6 @@ SOURCES += \
 
 HEADERS += \
     src/app/photo_editor_app_session.h \
-    src/photo_editor/photo_editor_cpu_renderer.h \
-    src/photo_editor/photo_editor_gpu_session.h \
-    src/photo_editor/photo_editor_render_args.h \
     src/photo_editor/photo_editor_result_types.h \
     src/app/texture_present_widget.h \
     src/photo_editor/photo_editor_gles2_backend.h \
@@ -41,7 +36,6 @@ HEADERS += \
     src/framework/execution/execution_common.h \
     src/framework/execution/qt_runtime_host.h \
     src/framework/execution/runtime_host.h \
-    src/framework/execution/runtime_invoker.h \
     src/framework/execution/runtime_scope.h \
     src/framework/execution/sync_lane.h \
     src/framework/platform/gl_types.h \

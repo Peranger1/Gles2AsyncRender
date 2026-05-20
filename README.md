@@ -55,10 +55,13 @@
   - `ExecutionOutcome`
   - `RuntimeHost`
   - `QtRuntimeHost`
-  - `RuntimeInvoker`
   - `RuntimeScope`
   - `AsyncLane`
   - `SyncLane`
+  - `execution::SerialQueue<N>`
+  - `execution::MergeWhileBusyQueue<N>`
+  - `execution::DeliverEveryStartedResult`
+  - `execution::DropStaleStartedResults`
   - `QueuePolicyKind`
   - `DeliveryPolicyKind`
 
@@ -68,9 +71,10 @@
   - `AsyncRenderMainWindow`
 
 - `photo_editor`
-  - `PhotoEditorGpuSession`
-  - `PhotoEditorCpuRenderer`
-  - `photo_editor_render_args`
+  - `photo_editor_gles2_backend`
+  - `photo_editor_result_types`
+
+当前业务主链路不再通过 `PhotoEditorGpuSession`、`PhotoEditorCpuRenderer`、`photo_editor_render_args` 或 `RuntimeInvoker` 做二次封装；`PhotoEditorAppSession` 使用模板化 `AsyncLane<Args, Result, QueuePolicy, DeliveryPolicy, WaitingMerger>` 选择执行语义，并在单步函数中直接调用 `photo_editor_init/create/set_output_size/set_opcode/process/render/destroy`。
   - `photo_editor_gles2_backend`
 
 当前实现不再保留旧的 `RequestDispatcher`、`RequestChannel`、`IRequestHandler`、`photo_editor_demo_handlers` 主链路。
@@ -88,32 +92,23 @@
 
 - [src/app/photo_editor_app_session.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_app_session.cpp)
   - 管理图片目录、当前图片、当前参数
-  - 持有 `QtRuntimeHost`、`RuntimeInvoker`、`AsyncLane`
+  - 持有 `QtRuntimeHost`、模板化 `AsyncLane`
+  - GPU 预览通过 `GpuPreviewRequest`、`execution::MergeWhileBusyQueue<3>`、`ReplaceGpuPreviewForSameSource` 显式实例化执行策略
+  - 直接在 runtime scope 内按单步顺序调用 `photo_editor_*`
+  - CPU 预览由 app session 内部同步函数直接生成，不再包进 renderer 类
   - 在 GPU 结果完成后调用 `IWriter`
   - 初始化时把 `RuntimeHost` / `IRuntime` attach 给 `IWriter`
   - 按 widget 下发的 `outputRevision` 发布纹理结果
 
-- [src/photo_editor/photo_editor_gpu_session.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_gpu_session.cpp)
-  - GPU runtime 亲和状态对象
-  - 管理 `photo_editor_*` 生命周期
-  - 发起异步 GPU 处理并收集 `RawGpuTextureResult`
-
-- [src/photo_editor/photo_editor_cpu_renderer.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_cpu_renderer.cpp)
-  - CPU 同步预览生成
-
 - [src/framework/execution/qt_runtime_host.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/qt_runtime_host.cpp)
   - 基于 Qt 事件循环的 `RuntimeHost` 实现
 
-- [src/photo_editor/photo_editor_render_args.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/photo_editor/photo_editor_render_args.h)
-  - GPU/CPU 预览参数快照
-
 - [src/framework/execution/async_lane.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/async_lane.h)
   - 通用异步执行 lane
-  - 提供 `MergeWhileBusy` 等 waiting 策略
-  - 支持 `DropStaleStartedResults`
-
-- [src/framework/execution/runtime_invoker.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/runtime_invoker.h)
-  - 普通同步调用和 runtime 同步调用入口
+  - 通过模板参数选择 queue policy、delivery policy、waiting merger
+  - 内置 `ImmediateQueue`、`SerialQueue<N>`、`MergeWhileBusyQueue<N>`
+  - 内置 `DeliverEveryStartedResult`、`DropStaleStartedResults`
+  - 内置 `RejectMerge`、`ReplaceWaitingWithIncoming`
 
 - [src/framework/platform/win_angle_d3d11/win_angle_runtime.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_runtime.cpp)
   - Windows worker ANGLE runtime
@@ -167,9 +162,9 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 ## 当前调度与展示语义
 
 - `AsyncLane` 的 GPU 预览主策略是：
-  - `queue policy = MergeWhileBusy`
-  - `delivery policy = DeliverEveryStartedResult`
-  - `maxWaitingCount = 3`
+  - `QueuePolicy = execution::MergeWhileBusyQueue<3>`
+  - `DeliveryPolicy = execution::DeliverEveryStartedResult`
+  - `WaitingMerger = ReplaceGpuPreviewForSameSource`
 - 这意味着：
   - active 请求不可取消
   - waiting 区域会优先保留最多 3 个中间 checkpoint

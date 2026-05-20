@@ -9,16 +9,16 @@
   - shared texture reader / writer
   - 平台 backend 总入口
 - `framework/execution`
-  - runtime host / invoker
+  - runtime host
   - lane 调度
   - sync / async 执行结果
-  - waiting 合并语义
+  - 模板化 waiting 合并语义
 - `app`
   - `QOpenGLWidget`
   - UI 显示与业务 glue
 - `photo_editor`
-  - photo editor GPU session / CPU renderer
-  - photo editor 参数快照与 GLES2 backend
+  - `photo_editor_gles2_backend`
+  - photo editor 结果类型
 
 当前实现不再保留旧的 `RequestDispatcher`、`RequestChannel`、`IRequestHandler`、`photo_editor_demo_handlers` 主链路。
 
@@ -68,10 +68,8 @@
   - `ExecutionOutcome`
   - `ExecutionError`
   - `TaskContext`
-  - `LaneConfig`
   - `QueuePolicyKind`
   - `DeliveryPolicyKind`
-  - `IWaitingMerger`
 
 - `runtime_host.h`
   - runtime 线程调度合同
@@ -79,16 +77,13 @@
 - `qt_runtime_host.*`
   - 基于 Qt 事件循环的 `RuntimeHost` 默认实现
 
-- `runtime_invoker.h`
-  - 直接同步调用
-  - runtime 同步调用
-
 - `runtime_scope.*`
   - `IRuntime::enter()/leave()` 的 RAII 包装
 
 - `async_lane.h`
   - 异步 lane
-  - 当前主用策略是 `MergeWhileBusy`
+  - 通过模板参数选择 queue policy、delivery policy、waiting merger
+  - 当前主用策略是 `execution::MergeWhileBusyQueue<3>`
   - waiting 区域会先保留多个 checkpoint，再对队尾请求做 merge
   - 当前 GPU 预览实现使用 `DeliverEveryStartedResult`
 
@@ -108,8 +103,9 @@
 - `photo_editor_app_session.*`
   - 管理目录、当前图片、当前参数
   - 持有 `QtRuntimeHost`
-  - 持有 `RuntimeInvoker`
-  - 持有 `AsyncLane<PhotoEditorGpuPreviewArgs, RawGpuTextureResult>`
+  - 持有模板化 `AsyncLane<GpuPreviewRequest, RawGpuTextureResult, execution::MergeWhileBusyQueue<3>, execution::DeliverEveryStartedResult, ReplaceGpuPreviewForSameSource>`
+  - 在 runtime scope 内直接执行 `photo_editor_init/create/set_output_size/set_opcode/process/render/destroy`
+  - CPU 预览是 app session 的同步单步函数，不再封装为 renderer 类
   - 初始化时把 `RuntimeHost` / `IRuntime` attach 给 `IWriter`
   - 在 GPU 结果完成后调用 `IWriter::submitTexture()`
 
@@ -118,37 +114,33 @@
 
 ### `src/photo_editor`
 
-- `photo_editor_render_args.h`
-  - GPU/CPU 预览参数快照
-
-- `photo_editor_gpu_session.*`
-  - GPU runtime 亲和状态对象
-  - 管理 `photo_editor_init/create/set/process/render/destroy`
-
-- `photo_editor_cpu_renderer.*`
-  - CPU 同步预览生成
+- `photo_editor_result_types.h`
+  - `RawGpuTextureResult`
+  - `CpuImageResult`
 
 - `photo_editor_gles2_backend.*`
   - 底层 GLES2 photo editor backend
+  - 对外暴露单步 `photo_editor_*` C 风格入口
+
+业务层不再保留 `photo_editor_render_args.h`、`PhotoEditorGpuSession`、`PhotoEditorCpuRenderer` 这类中间封装。
 
 ## 当前执行模型
 
 当前主实现使用两类调用路径：
 
 - GPU 异步预览
-  - 参数类型：`PhotoEditorGpuPreviewArgs`
-  - 执行器：`AsyncLane`
-  - queue policy：`MergeWhileBusy`
-  - delivery policy：`DeliverEveryStartedResult`
-  - max waiting count：`3`
-  - 实际执行者：`PhotoEditorGpuSession`
+  - 参数类型：`PhotoEditorAppSession::GpuPreviewRequest`
+  - 执行器：`AsyncLane<GpuPreviewRequest, RawGpuTextureResult, execution::MergeWhileBusyQueue<3>, execution::DeliverEveryStartedResult, ReplaceGpuPreviewForSameSource>`
+  - queue policy：模板参数 `execution::MergeWhileBusyQueue<3>`
+  - delivery policy：模板参数 `execution::DeliverEveryStartedResult`
+  - waiting merger：模板参数 `ReplaceGpuPreviewForSameSource`
+  - 实际执行：`PhotoEditorAppSession::runGpuPreviewStep()` 单步调用 `photo_editor_*`
 
 - CPU 同步预览
-  - 参数类型：`PhotoEditorCpuPreviewArgs`
-  - 执行方式：`RuntimeInvoker::callDirect()`
-  - 实际执行者：`PhotoEditorCpuRenderer`
+  - 参数来源：当前图片、当前参数、当前输出尺寸
+  - 执行方式：app worker 线程内直接同步调用 `renderCpuPreview(...)`
 
-这意味着当前项目已经从“按 request type 注册 handler”切换成“按执行语义选择 invoker 或 lane”。
+这意味着当前项目已经从“按 request type 注册 handler / wrapper class”切换成“按执行语义用模板参数选择 lane，再由业务单步函数直接调用底层能力”。
 
 ## 当前结果模型
 
@@ -204,14 +196,13 @@ GPU 结果在 app 的 `handleGpuPreviewCompleted()` 中调用 `IWriter` 转成 `
 - app worker 线程
   - `PhotoEditorAppSession`
   - `QtRuntimeHost`
-  - `PhotoEditorGpuSession`
 
 - runtime
   - `WinAngleRuntime`
   - `MacCocoaGlRuntime`
   - 由 `QtRuntimeHost` 管理进入/退出
 
-`PhotoEditorGpuSession` 只在 runtime 上下文内触碰 `photo_editor_*` 和 GLES2 资源；`PhotoEditorAppSession` 只负责业务编排和发起发布，不再负责平台补发链路。
+`PhotoEditorAppSession` 只在 runtime 上下文内触碰 `photo_editor_*` 和 GLES2 资源；平台补发链路仍由 `IWriter` / 平台 backend 负责。
 
 当前状态补充：
 

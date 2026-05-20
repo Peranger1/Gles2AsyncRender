@@ -5,7 +5,6 @@
 #include <QString>
 #include <QtGlobal>
 
-#include <functional>
 #include <optional>
 #include <utility>
 
@@ -31,6 +30,7 @@ enum class TaskState
     Succeeded,
     Failed,
     Rejected,
+    Superseded,
     Shutdown
 };
 
@@ -128,14 +128,6 @@ private:
     ExecutionError m_error;
 };
 
-struct LaneConfig final
-{
-    QString laneId;
-    QueuePolicyKind queuePolicy = QueuePolicyKind::Serial;
-    DeliveryPolicyKind deliveryPolicy = DeliveryPolicyKind::DeliverEveryStartedResult;
-    int maxWaitingCount = 1;
-};
-
 struct TaskContext final
 {
     TaskId taskId = 0;
@@ -147,29 +139,4 @@ struct SubmitResult final
     bool accepted = false;
     TaskId taskId = 0;
     ExecutionError error;
-};
-
-template <typename Args>
-class IWaitingMerger
-{
-public:
-    virtual ~IWaitingMerger() = default;
-
-    virtual bool canMerge(const Args &waiting, const Args &incoming) const = 0;
-    virtual Args merge(const Args &waiting, const Args &incoming) const = 0;
-};
-
-template <typename Args>
-class ReplaceWaitingWithIncomingMerger final : public IWaitingMerger<Args>
-{
-public:
-    bool canMerge(const Args &, const Args &) const override
-    {
-        return true;
-    }
-
-    Args merge(const Args &, const Args &incoming) const override
-    {
-        return incoming;
-    }
 };

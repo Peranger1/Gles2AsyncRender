@@ -2,18 +2,18 @@
 
 #include "framework/execution/async_lane.h"
 #include "framework/execution/execution_common.h"
-#include "framework/execution/runtime_invoker.h"
 #include "framework/platform/texture_types.h"
 #include "image_effect_types.h"
 #include "photo_editor/photo_editor_result_types.h"
-#include "photo_editor/photo_editor_gpu_session.h"
-#include "photo_editor/photo_editor_render_args.h"
 
 #include <QImage>
 #include <QObject>
 #include <QSize>
+#include <QString>
 
+#include <functional>
 #include <memory>
+#include <utility>
 
 class IPlatformBackend;
 class QtRuntimeHost;
@@ -51,31 +51,62 @@ signals:
 
 private:
     struct ImageCatalogState;
-
-    class PhotoEditorGpuPreviewArgsMerger final : public IWaitingMerger<PhotoEditorGpuPreviewArgs>
+    struct GpuPreviewRequest final
     {
-    public:
-        bool canMerge(const PhotoEditorGpuPreviewArgs &waiting,
-                      const PhotoEditorGpuPreviewArgs &incoming) const override;
-        PhotoEditorGpuPreviewArgs merge(const PhotoEditorGpuPreviewArgs &waiting,
-                                        const PhotoEditorGpuPreviewArgs &incoming) const override;
+        QString sourceKey;
+        quint64 sourceImageCacheKey = 0;
+        std::shared_ptr<const QImage> sourceImage;
+        ImageEffectParameters parameters;
+        QSize outputSize;
     };
 
-    PhotoEditorSourceSnapshot currentSourceSnapshot() const;
-    PhotoEditorGpuPreviewArgs buildGpuPreviewArgs() const;
-    PhotoEditorCpuPreviewArgs buildCpuPreviewArgs() const;
+    struct GpuProcessBridge;
+    struct ReplaceGpuPreviewForSameSource final
+    {
+        bool canMerge(const GpuPreviewRequest &waiting, const GpuPreviewRequest &incoming) const
+        {
+            return waiting.sourceKey == incoming.sourceKey;
+        }
+
+        GpuPreviewRequest merge(const GpuPreviewRequest &, GpuPreviewRequest incoming) const
+        {
+            return incoming;
+        }
+    };
+
+    using GpuPreviewLane = AsyncLane<GpuPreviewRequest,
+                                     RawGpuTextureResult,
+                                     execution::MergeWhileBusyQueue<3>,
+                                     execution::DeliverEveryStartedResult,
+                                     ReplaceGpuPreviewForSameSource>;
 
     void emitImageSelection();
     void submitGpuPreview();
     void runCpuPreviewSync();
+    void destroyGpuEditor();
+    ExecutionOutcome<void> ensurePhotoEditorInitialized(IRuntime *runtime);
+    ExecutionOutcome<void> ensureGpuEditor(IRuntime *runtime,
+                                           const std::shared_ptr<const QImage> &sourceImage,
+                                           const QString &sourceKey,
+                                           quint64 sourceImageCacheKey,
+                                           QSize outputSize);
+    void runGpuPreviewStep(const TaskContext &context,
+                           const GpuPreviewRequest &request,
+                           GpuPreviewLane::Done done);
+    ExecutionOutcome<RawGpuTextureResult> collectGpuRenderResult(IRuntime *runtime, void *handle);
     void handleGpuPreviewCompleted(TaskId taskId, ExecutionOutcome<RawGpuTextureResult> outcome);
+    static void onGpuProcessProgress(int progress, bool isEnd, void *userData);
 
     std::unique_ptr<ImageCatalogState> m_catalog;
     IPlatformBackend *m_backend = nullptr;
     std::unique_ptr<QtRuntimeHost> m_runtimeHost;
-    std::unique_ptr<RuntimeInvoker> m_invoker;
-    std::unique_ptr<PhotoEditorGpuSession> m_gpuSession;
-    std::unique_ptr<AsyncLane<PhotoEditorGpuPreviewArgs, RawGpuTextureResult>> m_gpuPreviewLane;
+    std::unique_ptr<GpuPreviewLane> m_gpuPreviewLane;
+    void *m_gpuEditorHandle = nullptr;
+    bool m_photoEditorInitialized = false;
+    QString m_gpuSourceKey;
+    quint64 m_gpuSourceImageCacheKey = 0;
+    std::shared_ptr<const QImage> m_gpuSourceImage;
+    std::shared_ptr<GpuProcessBridge> m_activeGpuBridge;
     ImageEffectParameters m_effectParameters;
     QSize m_outputSize;
     quint64 m_outputRevision = 0;

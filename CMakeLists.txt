@@ -15,11 +15,6 @@ find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 add_executable(Gles2AsyncRender
     src/app/photo_editor_app_session.cpp
     src/app/photo_editor_app_session.h
-    src/photo_editor/photo_editor_cpu_renderer.cpp
-    src/photo_editor/photo_editor_cpu_renderer.h
-    src/photo_editor/photo_editor_gpu_session.cpp
-    src/photo_editor/photo_editor_gpu_session.h
-    src/photo_editor/photo_editor_render_args.h
     src/photo_editor/photo_editor_result_types.h
     src/app/texture_present_widget.cpp
     src/app/texture_present_widget.h
@@ -38,7 +33,6 @@ add_executable(Gles2AsyncRender
     src/framework/execution/qt_runtime_host.cpp
     src/framework/execution/qt_runtime_host.h
     src/framework/execution/runtime_host.h
-    src/framework/execution/runtime_invoker.h
     src/framework/execution/runtime_scope.cpp
     src/framework/execution/runtime_scope.h
     src/framework/execution/sync_lane.h

@@ -4,7 +4,6 @@
 #include "runtime_host.h"
 
 #include <functional>
-#include <memory>
 
 template <typename Args, typename Result>
 class SyncLane
@@ -12,14 +11,9 @@ class SyncLane
 public:
     using Runner = std::function<ExecutionOutcome<Result>(const TaskContext &, const Args &)>;
 
-    SyncLane(RuntimeHost *host,
-             LaneConfig config,
-             Runner runner,
-             std::shared_ptr<IWaitingMerger<Args>> merger = {})
+    SyncLane(RuntimeHost *host, Runner runner)
         : m_host(host)
-        , m_config(std::move(config))
         , m_runner(std::move(runner))
-        , m_merger(std::move(merger))
     {
     }
 
@@ -53,7 +47,5 @@ public:
 
 private:
     RuntimeHost *m_host = nullptr;
-    LaneConfig m_config;
     Runner m_runner;
-    std::shared_ptr<IWaitingMerger<Args>> m_merger;
 };

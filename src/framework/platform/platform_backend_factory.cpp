@@ -13,9 +13,9 @@
 std::unique_ptr<IPlatformBackend> createDefaultPlatformBackend(int slotCount)
 {
 #if defined(Q_OS_WIN)
-    return std::make_unique<WinAnglePlatformBackend>(slotCount);
+    return createPlatformBackend<WinAnglePlatformBackend>(slotCount);
 #elif defined(Q_OS_MACOS)
-    return std::make_unique<MacCocoaGlPlatformBackend>(slotCount);
+    return createPlatformBackend<MacCocoaGlPlatformBackend>(slotCount);
 #else
     Q_UNUSED(slotCount);
     return {};
