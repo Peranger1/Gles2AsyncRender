@@ -10,9 +10,9 @@
   - 平台 backend 总入口
 - `framework/execution`
   - runtime host
-  - lane 调度
-  - sync / async 执行结果
-  - 模板化 waiting 合并语义
+  - GL task 执行器
+  - 可选 lane 调度
+  - sync / async 调用基础设施
 - `app`
   - `QOpenGLWidget`
   - UI 显示与业务 glue
@@ -80,18 +80,22 @@
 - `runtime_scope.*`
   - `IRuntime::enter()/leave()` 的 RAII 包装
 
+- `runtime_executor.*`
+  - 通用 GL task 执行器
+  - 提供 `post(void(IRuntime *))` 与 `call(void(IRuntime *))`
+  - 只负责进入 runtime 线程并顺序执行闭包
+  - 不包含 photo editor 业务类型、合并策略或结果发布逻辑
+
 - `async_lane.h`
   - 异步 lane
   - 通过模板参数选择 queue policy、delivery policy、waiting merger
-  - 当前主用策略是 `execution::MergeWhileBusyQueue<3>`
-  - waiting 区域会先保留多个 checkpoint，再对队尾请求做 merge
-  - 当前 GPU 预览实现使用 `DeliverEveryStartedResult`
+  - 当前作为可选执行工具保留，不再是 photo editor GPU 预览主路径
 
 - `sync_lane.h`
   - 同步 lane 基础接口
   - 当前项目中尚未成为主路径
 
-执行层只负责“在哪执行、怎么排队、怎么交付结果”，不持有 `IWriter`，也不要求“每个业务函数一个 handler 类”。
+执行层只负责“在哪执行”。photo editor 主路径中，合并、丢弃、latest-only、process-again、generation 防护和结果发布都位于业务层或平台层；execution 层不持有 `IWriter`，也不理解 `photo_editor_*` 业务语义。
 
 ### `src/app`
 
@@ -103,11 +107,26 @@
 - `photo_editor_app_session.*`
   - 管理目录、当前图片、当前参数
   - 持有 `QtRuntimeHost`
-  - 持有模板化 `AsyncLane<GpuPreviewRequest, RawGpuTextureResult, execution::MergeWhileBusyQueue<3>, execution::DeliverEveryStartedResult, ReplaceGpuPreviewForSameSource>`
-  - 在 runtime scope 内直接执行 `photo_editor_init/create/set_output_size/set_opcode/process/render/destroy`
+  - 持有 `PhotoEditorRuntimeService`
+  - 为当前图片选择或创建 `PhotoEditorHandleActor`
+  - 通过 actor 的 `setOutputSize()`、`setOpcode()`、`process()` 触发 GPU 预览
+  - 不直接调用 `photo_editor_*`
   - CPU 预览是 app session 的同步单步函数，不再封装为 renderer 类
   - 初始化时把 `RuntimeHost` / `IRuntime` attach 给 `IWriter`
   - 在 GPU 结果完成后调用 `IWriter::submitTexture()`
+
+- `photo_editor_runtime_service.*`
+  - 持有 `RuntimeExecutor`
+  - 将 `photo_editor_init` 作为独立 GL task 提交
+  - 创建并管理 per-handle actor
+  - shutdown 时同步销毁 actor handle，保证 runtime 关闭前完成清理
+
+- `photo_editor_handle_actor.*`
+  - 每张图一个 actor，每个 actor 管理一个 `photo_editor` handle
+  - public API 是线程安全业务入口
+  - 每个 GL task 最多调用一个 `photo_editor_*`
+  - SDK process callback 不直接 render，而是投递独立 `photo_editor_render` task
+  - 使用 generation token 屏蔽旧 task、旧 callback 和 destroy 后结果
 
 - `async_render_main_window.*`
   - demo 主窗口
@@ -129,18 +148,19 @@
 当前主实现使用两类调用路径：
 
 - GPU 异步预览
-  - 参数类型：`PhotoEditorAppSession::GpuPreviewRequest`
-  - 执行器：`AsyncLane<GpuPreviewRequest, RawGpuTextureResult, execution::MergeWhileBusyQueue<3>, execution::DeliverEveryStartedResult, ReplaceGpuPreviewForSameSource>`
-  - queue policy：模板参数 `execution::MergeWhileBusyQueue<3>`
-  - delivery policy：模板参数 `execution::DeliverEveryStartedResult`
-  - waiting merger：模板参数 `ReplaceGpuPreviewForSameSource`
-  - 实际执行：`PhotoEditorAppSession::runGpuPreviewStep()` 单步调用 `photo_editor_*`
+  - app 编排：`PhotoEditorAppSession`
+  - 全局服务：`PhotoEditorRuntimeService`
+  - handle 边界：`PhotoEditorHandleActor`
+  - 执行器：`RuntimeExecutor`
+  - 实际执行：actor 将 `photo_editor_init/create/set_output_size/set_opcode/process/render/destroy` 拆成单独 GL task
+  - task 约束：每个提交到 execution 层的 GL task 最多调用一个 `photo_editor_*`
+  - 策略归属：latest-only、process-again、destroy 优先级和 generation 防护都在 actor 内
 
 - CPU 同步预览
   - 参数来源：当前图片、当前参数、当前输出尺寸
   - 执行方式：app worker 线程内直接同步调用 `renderCpuPreview(...)`
 
-这意味着当前项目已经从“按 request type 注册 handler / wrapper class”切换成“按执行语义用模板参数选择 lane，再由业务单步函数直接调用底层能力”。
+这意味着当前项目已经从“按 request type 注册 handler / wrapper class”进一步切换成“framework 提供 GL context 中的 `void()` 顺序执行能力，业务层自己管理 handle 状态和请求策略”。
 
 ## 当前结果模型
 
@@ -155,7 +175,7 @@
 - `CpuImageResult`
   - 直接作为 CPU 图像结果交付
 
-GPU 结果在 app 的 `handleGpuPreviewCompleted()` 中调用 `IWriter` 转成 `TextureTicket`，然后再交给 UI。
+GPU 结果由 `PhotoEditorHandleActor::renderResult` 交回 app，app 在 `handleGpuRenderResult()` 中调用 `IWriter` 转成 `TextureTicket`，然后再交给 UI。
 
 当前 `IWriter` 发布合同是：
 
@@ -202,7 +222,7 @@ GPU 结果在 app 的 `handleGpuPreviewCompleted()` 中调用 `IWriter` 转成 `
   - `MacCocoaGlRuntime`
   - 由 `QtRuntimeHost` 管理进入/退出
 
-`PhotoEditorAppSession` 只在 runtime 上下文内触碰 `photo_editor_*` 和 GLES2 资源；平台补发链路仍由 `IWriter` / 平台 backend 负责。
+`PhotoEditorAppSession` 不直接触碰 `photo_editor_*` 或 GLES2 资源；这些调用被限制在 `PhotoEditorRuntimeService` / `PhotoEditorHandleActor` 提交给 `RuntimeExecutor` 的 GL task 内。平台补发链路仍由 `IWriter` / 平台 backend 负责。
 
 当前状态补充：
 

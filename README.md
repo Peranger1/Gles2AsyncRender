@@ -33,9 +33,10 @@
 - CPU 同步预览检查
   - 对当前图片和当前参数生成一张 CPU 小预览图
 - 执行语义
-  - GPU 预览使用 `MergeWhileBusy`
-  - waiting 区域会先保留多个 checkpoint，再对队尾请求做 merge
-  - 已启动的 GPU 任务结果当前会继续交付
+  - GPU 预览使用 `RuntimeExecutor + PhotoEditorRuntimeService + PhotoEditorHandleActor`
+  - execution 层只负责 GL context 中的 `void(IRuntime *)` 顺序执行
+  - 每个提交到 execution 层的 GL task 最多只调用一个 `photo_editor_*`
+  - 合并、丢弃、latest-only 和 process-again 策略由 per-handle actor 管理
   - CPU 预览直接同步执行，不进入 lane
 
 ## 当前架构
@@ -56,6 +57,7 @@
   - `RuntimeHost`
   - `QtRuntimeHost`
   - `RuntimeScope`
+  - `RuntimeExecutor`
   - `AsyncLane`
   - `SyncLane`
   - `execution::SerialQueue<N>`
@@ -68,14 +70,15 @@
 - `app`
   - `TexturePresentWidget`
   - `PhotoEditorAppSession`
+  - `PhotoEditorRuntimeService`
+  - `PhotoEditorHandleActor`
   - `AsyncRenderMainWindow`
 
 - `photo_editor`
   - `photo_editor_gles2_backend`
   - `photo_editor_result_types`
 
-当前业务主链路不再通过 `PhotoEditorGpuSession`、`PhotoEditorCpuRenderer`、`photo_editor_render_args` 或 `RuntimeInvoker` 做二次封装；`PhotoEditorAppSession` 使用模板化 `AsyncLane<Args, Result, QueuePolicy, DeliveryPolicy, WaitingMerger>` 选择执行语义，并在单步函数中直接调用 `photo_editor_init/create/set_output_size/set_opcode/process/render/destroy`。
-  - `photo_editor_gles2_backend`
+当前业务主链路不再通过 `PhotoEditorGpuSession`、`PhotoEditorCpuRenderer`、`photo_editor_render_args` 或 `RuntimeInvoker` 做二次封装；GPU 预览主路径由 `PhotoEditorAppSession` 编排 `PhotoEditorRuntimeService` 和 per-handle `PhotoEditorHandleActor`，actor 将每个 `photo_editor_*` 调用拆成单独的 GL task 提交给 `RuntimeExecutor`。
 
 当前实现不再保留旧的 `RequestDispatcher`、`RequestChannel`、`IRequestHandler`、`photo_editor_demo_handlers` 主链路。
 
@@ -92,13 +95,32 @@
 
 - [src/app/photo_editor_app_session.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_app_session.cpp)
   - 管理图片目录、当前图片、当前参数
-  - 持有 `QtRuntimeHost`、模板化 `AsyncLane`
-  - GPU 预览通过 `GpuPreviewRequest`、`execution::MergeWhileBusyQueue<3>`、`ReplaceGpuPreviewForSameSource` 显式实例化执行策略
-  - 直接在 runtime scope 内按单步顺序调用 `photo_editor_*`
+  - 持有 `QtRuntimeHost` 和 `PhotoEditorRuntimeService`
+  - 为当前图片选择或创建 `PhotoEditorHandleActor`
+  - GPU 预览通过 actor 的 `setOutputSize()`、`setOpcode()`、`process()` 单步入口触发
+  - 不直接调用 `photo_editor_*`
   - CPU 预览由 app session 内部同步函数直接生成，不再包进 renderer 类
   - 在 GPU 结果完成后调用 `IWriter`
   - 初始化时把 `RuntimeHost` / `IRuntime` attach 给 `IWriter`
   - 按 widget 下发的 `outputRevision` 发布纹理结果
+
+- [src/app/photo_editor_runtime_service.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_runtime_service.cpp)
+  - 持有 `RuntimeExecutor`
+  - 将 `photo_editor_init` 作为独立 GL task 提交
+  - 创建并管理 per-handle actor
+  - shutdown 时同步销毁 actor handle，保证 runtime 关闭前完成清理
+
+- [src/app/photo_editor_handle_actor.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_handle_actor.cpp)
+  - 每个 actor 对应一张图和一个 `photo_editor` handle
+  - public API 是线程安全入口
+  - 每个 GL task 内最多调用一个 `photo_editor_*`
+  - SDK process callback 只触发独立 render task，不直接调用 render
+  - 使用 generation token 屏蔽旧 task、旧 callback 和 destroy 后结果
+
+- [src/framework/execution/runtime_executor.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/runtime_executor.cpp)
+  - 通用 GL task 执行器
+  - 提供 `post(void(IRuntime *))` 和 `call(void(IRuntime *))`
+  - 不包含 photo editor 业务类型或合并策略
 
 - [src/framework/execution/qt_runtime_host.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/qt_runtime_host.cpp)
   - 基于 Qt 事件循环的 `RuntimeHost` 实现
@@ -161,15 +183,13 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 
 ## 当前调度与展示语义
 
-- `AsyncLane` 的 GPU 预览主策略是：
-  - `QueuePolicy = execution::MergeWhileBusyQueue<3>`
-  - `DeliveryPolicy = execution::DeliverEveryStartedResult`
-  - `WaitingMerger = ReplaceGpuPreviewForSameSource`
-- 这意味着：
-  - active 请求不可取消
-  - waiting 区域会优先保留最多 3 个中间 checkpoint
-  - waiting 满后，新请求只和队尾 waiting tail 合并
-  - started 请求一旦完成，当前实现仍会继续进入结果发布路径
+- GPU 预览主路径已经从 `AsyncLane<GpuPreviewRequest, ...>` 迁移到 per-handle actor：
+  - `RuntimeExecutor` 只按提交顺序执行 `void(IRuntime *)`
+  - `PhotoEditorRuntimeService` 负责 `photo_editor_init` 和 actor 生命周期
+  - `PhotoEditorHandleActor` 负责 handle 状态、latest-only 参数、process-again 和 generation 防护
+  - `setOutputSize()`、`setOpcode()`、`process()` 支持跨线程调用
+  - SDK callback 到达后由 actor 投递独立 `photo_editor_render` task
+- `AsyncLane` / `SyncLane` 仍保留在 execution 层，但不再是 photo editor GPU 预览主路径。
 - 平台纹理发布不是 latest-only：
   - `D3D11SharedTextureSlots` 维护多 `Ready` 槽队列
   - `IWriter::submitTexture()` 显式在调用方提供的 runtime 上下文里发布纹理
