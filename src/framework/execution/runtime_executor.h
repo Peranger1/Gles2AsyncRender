@@ -1,31 +1,105 @@
 #pragma once
 
-#include "execution_common.h"
-#include "runtime_host.h"
+#include "framework/execution/future/async_future.h"
+#include "framework/execution/lane/lane_exceptions.h"
+#include "framework/platform/runtime.h"
 
-#include <QMutex>
 #include <QString>
 
-#include <functional>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+namespace execution
+{
+class RuntimeUnavailable final : public async::FutureException
+{
+public:
+    RuntimeUnavailable()
+        : async::FutureException("Runtime unavailable")
+    {
+    }
+
+    explicit RuntimeUnavailable(const std::string &message)
+        : async::FutureException(message)
+    {
+    }
+};
+
+class RuntimeInitializeFailed final : public async::FutureException
+{
+public:
+    RuntimeInitializeFailed()
+        : async::FutureException("Runtime initialize failed")
+    {
+    }
+
+    explicit RuntimeInitializeFailed(const std::string &message)
+        : async::FutureException(message)
+    {
+    }
+};
 
 class RuntimeExecutor final
 {
 public:
-    using RuntimeTask = std::function<void(IRuntime *)>;
+    RuntimeExecutor(std::unique_ptr<IRuntime> runtime,
+                    std::shared_ptr<async::SingleThreadExecutor> executor = {});
+    ~RuntimeExecutor();
 
-    explicit RuntimeExecutor(RuntimeHost *host);
+    RuntimeExecutor(const RuntimeExecutor &) = delete;
+    RuntimeExecutor &operator=(const RuntimeExecutor &) = delete;
 
-    SubmitResult post(RuntimeTask task);
-    bool call(RuntimeTask task, QString *error);
+    async::Future<async::Unit> initialize();
+
+    template <typename F>
+    auto submit(F &&func)
+        -> async::Future<typename async::detail::FutureValue<std::invoke_result_t<F, IRuntime &>>::Type>
+    {
+        using RawResult = std::invoke_result_t<F, IRuntime &>;
+        using Result = typename async::detail::FutureValue<RawResult>::Type;
+
+        const auto state = m_state;
+        if (!state || state->shutdown.load()) {
+            return async::makeExceptionFuture<Result>(std::make_exception_ptr(ExecutorShutdown()));
+        }
+        if (!state->runtime || !state->executor || state->executor->isShutdown()) {
+            return async::makeExceptionFuture<Result>(std::make_exception_ptr(RuntimeUnavailable()));
+        }
+
+        auto funcHolder = std::make_shared<typename std::decay<F>::type>(std::forward<F>(func));
+        return async::makeReadyFuture()
+            .via(state->executor)
+            .thenValue([state, funcHolder]() -> RawResult {
+                if (state->shutdown.load() || !state->runtime) {
+                    throw ExecutorShutdown();
+                }
+                return (*funcHolder)(*state->runtime);
+            });
+    }
+
+    async::Future<async::Unit> shutdown();
+    bool isShutdown() const;
     bool isOnRuntimeThread() const;
-
-    // Rejects future submissions only. Tasks already dispatched into the host
-    // event loop may still run and must be guarded by their owning layer.
-    void shutdown();
+    std::shared_ptr<async::SingleThreadExecutor> executor() const;
 
 private:
-    RuntimeHost *m_host = nullptr;
-    mutable QMutex m_mutex;
-    TaskId m_nextTaskId = 0;
-    bool m_shuttingDown = false;
+    struct State final
+    {
+        State(std::unique_ptr<IRuntime> runtimeIn,
+              std::shared_ptr<async::SingleThreadExecutor> executorIn);
+
+        std::unique_ptr<IRuntime> runtime;
+        std::shared_ptr<async::SingleThreadExecutor> executor;
+        std::atomic<bool> initialized { false };
+        std::atomic<bool> shutdown { false };
+    };
+
+    static std::string errorMessage(const QString &message, const char *fallback);
+
+    std::shared_ptr<State> m_state;
 };
+}

@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(CTest)
+
 find_package(Qt5 REQUIRED COMPONENTS Widgets Gui OpenGL)
 
 add_executable(Gles2AsyncRender
@@ -33,15 +35,34 @@ add_executable(Gles2AsyncRender
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h
     src/framework/execution/async_lane.h
+    src/framework/execution/future/async.h
+    src/framework/execution/future/async_future.h
+    src/framework/execution/future/combinators.h
+    src/framework/execution/future/exceptions.h
+    src/framework/execution/future/executor.h
+    src/framework/execution/future/future.h
+    src/framework/execution/future/future_splitter.h
+    src/framework/execution/future/promise.h
+    src/framework/execution/future/shared_state.h
+    src/framework/execution/future/timeout.h
+    src/framework/execution/future/try.h
+    src/framework/execution/future/unit.h
+    src/framework/execution/execution.h
     src/framework/execution/execution_common.h
+    src/framework/execution/lane/lane_exceptions.h
+    src/framework/execution/lane/latest_lane.h
+    src/framework/execution/lane/merge_lane.h
+    src/framework/execution/lane/serial_lane.h
     src/framework/execution/qt_runtime_host.cpp
     src/framework/execution/qt_runtime_host.h
     src/framework/execution/runtime_executor.cpp
     src/framework/execution/runtime_executor.h
+    src/framework/execution/runtime_execution.h
     src/framework/execution/runtime_host.h
     src/framework/execution/runtime_scope.cpp
     src/framework/execution/runtime_scope.h
     src/framework/execution/sync_lane.h
+    src/framework/execution/task_scheduler.h
     src/framework/platform/platform_backend.h
     src/framework/platform/platform_backend_factory.cpp
     src/framework/platform/platform_backend_factory.h
@@ -107,4 +128,41 @@ if (APPLE)
         "-framework IOSurface"
         "-framework CoreFoundation"
     )
+endif()
+
+if (BUILD_TESTING)
+    add_executable(async_future_tests
+        src/framework/execution/future/test/future_tests.cpp
+    )
+
+    target_include_directories(async_future_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_test(NAME async_future_tests COMMAND async_future_tests)
+
+    add_executable(execution_tests
+        src/framework/execution/test/execution_tests.cpp
+    )
+
+    target_include_directories(execution_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_test(NAME execution_tests COMMAND execution_tests)
+
+    add_executable(runtime_executor_tests
+        src/framework/execution/test/runtime_executor_tests.cpp
+        src/framework/execution/runtime_executor.cpp
+    )
+
+    target_include_directories(runtime_executor_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(runtime_executor_tests PRIVATE
+        Qt5::Core
+    )
+
+    add_test(NAME runtime_executor_tests COMMAND runtime_executor_tests)
 endif()
