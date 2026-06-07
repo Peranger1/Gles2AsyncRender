@@ -192,6 +192,10 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
   - 当前框架的正式架构说明
   - 当前代码结构、线程边界、结果模型
 
+- [src/framework/execution/USAGE.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/USAGE.md)
+  - execution 层使用示例
+  - 覆盖 future、executor、异常传播、runtime executor、timeout 和 combinator
+
 - [docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md)
   - 历史重构记录，不是当前框架的正式文档
   - 其中关于 `request_channel` / `request_dispatcher` / `photo_editor_demo_handlers` / `AsyncLane` 的表述已过时
