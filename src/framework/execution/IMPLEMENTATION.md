@@ -179,6 +179,10 @@ merger.merge(oldArgs, incomingArgs)
 
 构造时调用 `enter(error)`，析构时如果 enter 成功则调用 `leave()`。它不拥有 runtime，也不负责 initialize/shutdown。调用方应在 `RuntimeExecutor::submit()` 的 lambda 内创建它。
 
+## 源码注释约定
+
+源码注释使用中文，重点说明 API 约束、线程边界、生命周期转移和非显然状态转换。测试文件应在文件顶部说明覆盖范围，并在复杂边界用例前说明验证目的。不要给简单赋值、直接返回或测试名已经清楚表达的断言逐行加注释。
+
 ## 维护约束
 
 - 不要在通用 execution 头里引入 Qt 或平台 GL 头。

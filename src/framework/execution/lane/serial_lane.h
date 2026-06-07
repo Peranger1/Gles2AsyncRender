@@ -16,6 +16,7 @@ template <typename Args, typename Result>
 class SerialLane final
 {
 public:
+    // runner 必须返回有效 future；要拒绝任务时返回 failed future，而不是 invalid future。
     using Runner = std::function<async::Future<Result>(Args)>;
 
     explicit SerialLane(Runner runner)
@@ -39,9 +40,11 @@ public:
             }
 
             if (!m_state->active) {
+                // 没有 active 任务时，本次提交立即成为 active。
                 m_state->active = true;
                 shouldStart = true;
             } else {
+                // active 未完成时只排队，不在锁内启动 runner。
                 m_state->waiting.push_back(std::move(pending));
                 return future;
             }
@@ -62,6 +65,7 @@ public:
                 return;
             }
             m_state->shutdown = true;
+            // shutdown 只拒绝等待队列，已经 active 的任务仍交给 runner future 完成。
             waiting = std::move(m_state->waiting);
             m_state->waiting.clear();
         }
@@ -96,6 +100,7 @@ private:
     {
         async::Future<Result> work;
         try {
+            // runner 在锁外执行，避免业务代码重入 lane 状态锁。
             work = state->runner(std::move(pending.args));
             if (!work.valid()) {
                 throw async::FutureInvalid();
@@ -108,6 +113,7 @@ private:
 
         std::move(work).thenTry([state, promise = pending.promise](async::Try<Result> &&result) {
             promise->setTry(std::move(result));
+            // active 完成后再尝试启动队首，保持严格 FIFO。
             startNext(state);
             return async::Unit();
         });
@@ -122,6 +128,7 @@ private:
                 next = std::move(state->waiting.front());
                 state->waiting.pop_front();
             } else {
+                // 没有可启动的 waiting 时释放 active 标志，下一次 submit 可直接启动。
                 state->active = false;
             }
         }

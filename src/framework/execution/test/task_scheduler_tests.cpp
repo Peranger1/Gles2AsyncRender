@@ -14,6 +14,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 TaskScheduler 的提交、拒绝、异常传播和返回 Future<T> flatten。
+
 void taskSchedulerRunsSubmittedTask()
 {
     execution::TaskScheduler scheduler(async::InlineExecutor::instance());
@@ -91,6 +93,7 @@ void taskSchedulerFlattensReturnedFuture()
 
 void taskSchedulerFlattensPendingReturnedFuture()
 {
+    // 验证 scheduler 不会把返回的 pending Future<T> 误判为已完成。
     execution::TaskScheduler scheduler(async::InlineExecutor::instance());
     auto promise = std::make_shared<async::Promise<int>>();
 
@@ -134,6 +137,7 @@ void taskSchedulerPropagatesReturnedFutureException()
 
 void taskSchedulerRejectsInvalidReturnedFuture()
 {
+    // 验证用户任务返回 invalid future 时，caller 能观察到 FutureInvalid。
     execution::TaskScheduler scheduler(async::InlineExecutor::instance());
 
     auto future = scheduler.submit([]() {

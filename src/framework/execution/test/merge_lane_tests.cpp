@@ -14,6 +14,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 MergeLane 的 waiting 合并、拒绝和 runner 失败恢复。
+
 struct SumMerger final
 {
     bool canMerge(const int &, const int &) const
@@ -29,6 +31,7 @@ struct SumMerger final
 
 void mergeLaneMergesWaitingTask()
 {
+    // 验证已有 waiting 时，新任务可合并并替换旧 waiting。
     std::vector<int> started;
     std::vector<std::shared_ptr<async::Promise<int>>> completions;
 
@@ -72,6 +75,7 @@ struct RejectMerge final
 
 void mergeLaneRejectsUnmergeableIncomingTask()
 {
+    // 验证 merger 拒绝合并时，incoming future 以 TaskRejected 结束。
     auto activePromise = std::make_shared<async::Promise<int>>();
     execution::MergeLane<int, int, RejectMerge> lane([&](int value) {
         if (value == 1) {

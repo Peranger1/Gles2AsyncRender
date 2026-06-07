@@ -17,6 +17,7 @@ namespace async
 template <typename T>
 class Future;
 
+// 中断句柄是协作式中断信号：只通知生产端，不直接完成 future。
 class InterruptHandle final
 {
 public:
@@ -107,6 +108,7 @@ public:
     Future(const Future &) = delete;
     Future &operator=(const Future &) = delete;
 
+    // Future 是单消费者对象；valid 只表示还持有共享状态，不代表结果已完成。
     bool valid() const
     {
         return m_state != nullptr;
@@ -120,6 +122,7 @@ public:
     InterruptHandle interruptHandle() const
     {
         throwIfInvalid();
+        // 句柄捕获共享状态，因此可以在 Future 被移动后继续向生产端发送中断。
         std::shared_ptr<SharedState<T>> state = m_state;
         return InterruptHandle([state](std::exception_ptr interrupt) {
             state->raise(std::move(interrupt));
@@ -128,6 +131,7 @@ public:
 
     void cancel()
     {
+        // cancel 只是送出 FutureCancelled；是否完成结果由生产端的中断处理器决定。
         raise(std::make_exception_ptr(FutureCancelled()));
     }
 
@@ -140,6 +144,7 @@ public:
     Future<T> via(std::shared_ptr<Executor> executor) &&
     {
         throwIfInvalid();
+        // via 只设置当前 future 的下一次回调执行器，不会自动传递给所有下游。
         m_state->setExecutor(std::move(executor));
         return std::move(*this);
     }
@@ -147,6 +152,7 @@ public:
     T get()
     {
         throwIfInvalid();
+        // get 消费当前 future；取走内部状态后再次使用同一个 Future 会抛 FutureInvalid。
         std::shared_ptr<SharedState<T>> state = std::move(m_state);
         Try<T> result = state->waitAndTake();
         return std::move(result).value();
@@ -156,6 +162,7 @@ public:
     bool waitFor(std::chrono::duration<Rep, Period> timeout) const
     {
         throwIfInvalid();
+        // waitFor 只观察就绪状态，不消费结果。
         return m_state->waitFor(timeout);
     }
 
@@ -163,6 +170,7 @@ public:
     bool waitUntil(std::chrono::time_point<Clock, Duration> deadline) const
     {
         throwIfInvalid();
+        // waitUntil 和 waitFor 一样不消费结果；成功后仍需 get/getUntil 取值。
         return m_state->waitUntil(deadline);
     }
 
@@ -172,9 +180,11 @@ public:
         throwIfInvalid();
         std::shared_ptr<SharedState<T>> state = m_state;
         if (!state->waitFor(timeout)) {
+            // 超时时不消费 future，调用方仍可继续等待或 get。
             throw FutureTimeout();
         }
 
+        // 只有成功取得就绪结果时才消费当前 future。
         m_state.reset();
         Try<T> result = state->takeResult();
         return std::move(result).value();
@@ -186,6 +196,7 @@ public:
         throwIfInvalid();
         std::shared_ptr<SharedState<T>> state = m_state;
         if (!state->waitUntil(deadline)) {
+            // 超时时不消费 future，保持和 getFor 一致。
             throw FutureTimeout();
         }
 
@@ -206,6 +217,7 @@ public:
         Future<Result> nextFuture(nextState);
         auto funcHolder = std::make_shared<typename std::decay<F>::type>(std::forward<F>(func));
 
+        // 延续回调会消费源 future，并把返回值统一兑现到新的 Future<Result>。
         std::shared_ptr<SharedState<T>> state = std::move(m_state);
         state->setCallback(
             [nextState, funcHolder](Try<T> &&result) mutable {
@@ -236,6 +248,7 @@ public:
         state->setCallback(
             [nextState, funcHolder](Try<T> &&result) mutable {
                 if (result.hasException()) {
+                    // thenValue 只处理成功值；上游异常原样向下游传播。
                     nextState->setResult(Try<Result>::fromException(result.exception()));
                     return;
                 }
@@ -269,6 +282,7 @@ public:
         state->setCallback(
             [nextState, funcHolder](Try<T> &&result) mutable {
                 if (!result.hasException()) {
+                    // thenError 只处理异常；成功结果原样传递。
                     nextState->setResult(std::move(result));
                     return;
                 }
@@ -297,6 +311,7 @@ public:
         state->setCallback(
             [nextState, funcHolder](Try<T> &&result) mutable {
                 if (!result.hasException()) {
+                    // 带异常类型的 thenError 同样不处理成功结果。
                     nextState->setResult(std::move(result));
                     return;
                 }
@@ -304,6 +319,7 @@ public:
                 try {
                     std::rethrow_exception(result.exception());
                 } catch (const E &exception) {
+                    // 只恢复匹配类型的异常；不匹配时保持原异常。
                     detail::fulfillStateWith<T>(nextState, [&]() {
                         return (*funcHolder)(exception);
                     });
@@ -332,6 +348,7 @@ public:
             [nextState, funcHolder](Try<T> &&result) mutable {
                 try {
                     using Result = std::invoke_result_t<F>;
+                    // ensure 是同步清理钩子：忽略返回值，保留原结果。
                     if constexpr (std::is_void<Result>::value) {
                         (*funcHolder)();
                     } else {
@@ -365,6 +382,7 @@ private:
     void throwIfInvalid() const
     {
         if (!m_state) {
+            // 所有消费型操作都会清空内部状态，后续访问必须显式失败。
             throw FutureInvalid();
         }
     }
@@ -385,6 +403,7 @@ void fulfillStateWith(const std::shared_ptr<SharedState<T>> &state, F &&func)
             func();
             state->setResult(Try<T>::fromValue(Unit()));
         } else if constexpr (IsFuture<Result>::value) {
+            // 返回 Future<T> 时进行展开：外层状态等待内层 future 的最终结果。
             auto innerFuture = func();
             if (!innerFuture.valid()) {
                 state->setResult(Try<T>::fromException(std::make_exception_ptr(FutureInvalid())));
@@ -412,6 +431,7 @@ template <typename T>
 void failStateWithExecutorRejected(const std::shared_ptr<SharedState<T>> &state) noexcept
 {
     try {
+        // 执行器拒绝调度时必须兑现下游 future，避免调用方永久等待。
         state->setResult(Try<T>::fromException(std::make_exception_ptr(ExecutorRejected())));
     } catch (...) {
     }

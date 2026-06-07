@@ -20,6 +20,9 @@ namespace
 {
 using execution_test::require;
 using execution_test::requireThrows;
+
+// 本文件覆盖 executor 调度边界、拒绝路径、线程执行位置和 async flatten。
+
 class RejectingExecutor final : public async::Executor
 {
 public:
@@ -77,6 +80,7 @@ void continuationRunsThroughViaExecutor()
 
 void asyncRejectedExecutorCompletesWithExecutorRejected()
 {
+    // 验证初始投递被拒绝时，future 立即以 ExecutorRejected 完成。
     auto executor = std::make_shared<RejectingExecutor>();
     auto future = async::async(executor, []() {
         return 42;
@@ -91,6 +95,7 @@ void asyncRejectedExecutorCompletesWithExecutorRejected()
 
 void continuationRejectedByViaExecutorCompletesDownstream()
 {
+    // 验证 continuation 调度失败时，下游 future 不会悬空。
     auto executor = std::make_shared<RejectingExecutor>();
     async::Promise<int> promise;
     bool ran = false;
@@ -135,6 +140,7 @@ void asyncRunsOnThreadExecutor()
 
 void asyncFlattensReturnedFuture()
 {
+    // 验证 async producer 返回 pending Future<T> 时，外层 future 等待内层完成。
     auto executor = async::InlineExecutor::instance();
     auto innerPromise = std::make_shared<async::Promise<int>>();
     auto future = async::async(executor, [innerPromise]() {
@@ -180,6 +186,7 @@ void asyncPropagatesReturnedFutureException()
 
 void asyncRejectsInvalidReturnedFuture()
 {
+    // 验证 producer 返回 invalid future 时，错误被显式传播给 caller。
     auto executor = async::InlineExecutor::instance();
     auto future = async::async(executor, []() {
         return async::Future<int>();

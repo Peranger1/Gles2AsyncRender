@@ -14,6 +14,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 LatestLane 的 waiting 替换、stale 策略和 active 状态恢复。
+
 void latestLaneSupersedesWaitingTask()
 {
     std::vector<int> started;
@@ -46,6 +48,7 @@ void latestLaneSupersedesWaitingTask()
 
 void latestLaneCanMarkActiveResultStaleWhenNewerWaitingExists()
 {
+    // 验证 stale 策略下，active 完成时若已有更新 waiting，则 active 结果不再交付。
     std::vector<int> started;
     std::vector<std::shared_ptr<async::Promise<int>>> completions;
 
@@ -76,6 +79,7 @@ void latestLaneCanMarkActiveResultStaleWhenNewerWaitingExists()
 
 void latestLaneRunnerThrowClearsActiveState()
 {
+    // 验证 runner 失败后 lane 能接受新的提交。
     std::vector<int> started;
     std::vector<std::shared_ptr<async::Promise<int>>> completions;
 

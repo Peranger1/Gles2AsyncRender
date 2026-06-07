@@ -13,6 +13,7 @@ RuntimeScope::RuntimeScope(IRuntime *runtime, QString *error)
 RuntimeScope::~RuntimeScope()
 {
     if (m_runtime && m_entered) {
+        // 只有 enter 成功后才 leave，保持 runtime 的进入/退出配对。
         m_runtime->leave();
     }
 }

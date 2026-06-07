@@ -10,6 +10,7 @@ RuntimeExecutor::State::State(std::unique_ptr<IRuntime> runtimeIn,
     , executor(std::move(executorIn))
 {
     if (!executor) {
+        // 默认创建专属 runtime 线程，避免通用 execution 任务误入平台 runtime。
         executor = std::make_shared<async::SingleThreadExecutor>("runtime");
     }
 }
@@ -24,6 +25,7 @@ RuntimeExecutor::~RuntimeExecutor()
 {
     try {
         if (m_state && m_state->executor && !m_state->executor->isOnExecutorThread()) {
+            // 析构里的 shutdown 是兜底路径；正常调用方仍应显式 shutdown 并观察结果。
             shutdown().get();
         }
     } catch (...) {
@@ -47,6 +49,7 @@ async::Future<async::Unit> RuntimeExecutor::initialize()
                 throw ExecutorShutdown();
             }
             if (state->initialized.load()) {
+                // initialize 幂等：已经初始化后直接完成，不重复触碰平台 runtime。
                 return;
             }
 
@@ -65,10 +68,12 @@ async::Future<async::Unit> RuntimeExecutor::shutdown()
         return async::makeReadyFuture();
     }
     if (state->shutdown.exchange(true)) {
+        // shutdown 幂等：只有第一次调用实际释放 runtime。
         return async::makeReadyFuture();
     }
     if (!state->executor || state->executor->isShutdown()) {
         if (state->runtime) {
+            // executor 已不可用时只能在当前线程兜底释放 runtime。
             state->runtime->shutdown();
             state->runtime.reset();
         }
@@ -79,6 +84,7 @@ async::Future<async::Unit> RuntimeExecutor::shutdown()
         .via(state->executor)
         .thenValue([state]() {
             if (state->runtime) {
+                // 正常路径把 runtime shutdown 和释放固定在 runtime 线程。
                 state->runtime->shutdown();
                 state->runtime.reset();
             }

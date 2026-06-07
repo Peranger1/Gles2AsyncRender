@@ -71,6 +71,7 @@ public:
         }
 
         auto funcHolder = std::make_shared<typename std::decay<F>::type>(std::forward<F>(func));
+        // 所有 runtime 访问都固定到 runtime executor；排队后运行前还会再检查 shutdown。
         return async::makeReadyFuture()
             .via(state->executor)
             .thenValue([state, funcHolder]() -> RawResult {
@@ -100,10 +101,12 @@ public:
             if (state->shutdown.load() || !state->runtime) {
                 throw ExecutorShutdown();
             }
+            // 已在 runtime 线程时 inline 执行，避免 submit().get() 等待自己。
             if constexpr (std::is_void<RawResult>::value) {
                 std::forward<F>(func)(*state->runtime);
                 return async::Unit();
             } else if constexpr (async::detail::IsFuture<RawResult>::value) {
+                // inline flatten 会同步等待 inner future；调用方要避免返回依赖同一 executor 的 pending future。
                 return std::forward<F>(func)(*state->runtime).get();
             } else {
                 return std::forward<F>(func)(*state->runtime);
@@ -126,6 +129,7 @@ private:
 
         std::unique_ptr<IRuntime> runtime;
         std::shared_ptr<async::SingleThreadExecutor> executor;
+        // initialized/shutdown 是跨提交线程观察的闸门，具体 runtime 操作仍在 executor 上完成。
         std::atomic<bool> initialized { false };
         std::atomic<bool> shutdown { false };
     };

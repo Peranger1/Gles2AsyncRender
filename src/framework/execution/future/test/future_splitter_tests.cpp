@@ -21,8 +21,11 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 FutureSplitter 将单消费者 future 广播给多个消费者的行为。
+
 void futureSplitterFanoutBeforeCompletion()
 {
+    // 验证源 future 完成前创建的多个子 future 都能收到同一个结果。
     async::Promise<int> promise;
     async::FutureSplitter<int> splitter(promise.getFuture());
 
@@ -39,6 +42,7 @@ void futureSplitterFanoutBeforeCompletion()
 
 void futureSplitterReturnsReadyFutureAfterCompletion()
 {
+    // 验证源 future 已完成后，新获取的子 future 也能立即拿到缓存结果。
     async::Promise<int> promise;
     async::FutureSplitter<int> splitter(promise.getFuture());
     auto first = splitter.getFuture();

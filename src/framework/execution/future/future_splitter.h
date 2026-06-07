@@ -53,6 +53,7 @@ public:
     explicit FutureSplitter(Future<T> future)
         : m_state(std::make_shared<detail::FutureSplitterState<T>>())
     {
+        // splitter 需要为每个 consumer 复制一份结果，因此 T 当前必须可拷贝。
         static_assert(std::is_copy_constructible<T>::value,
                       "FutureSplitter<T> currently requires T to be copy constructible.");
 
@@ -64,6 +65,7 @@ public:
         auto state = m_state;
         std::move(future).thenTry([state](Try<T> &&result) {
             std::vector<Promise<T>> waiters;
+            // 原始结果只消费一次，之后保存可复制的 Try 供后续 getFuture() 复用。
             Try<T> stored = result.hasException()
                 ? Try<T>::fromException(result.exception())
                 : Try<T>::fromValue(std::move(result).value());
@@ -109,6 +111,7 @@ public:
             if (m_state->result.has_value()) {
                 result = detail::copyTry(*m_state->result);
             } else {
+                // 源 future 未完成时先挂起 waiter；完成后统一广播结果。
                 m_state->waiters.push_back(std::move(promise));
                 return future;
             }

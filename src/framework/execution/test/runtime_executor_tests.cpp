@@ -18,6 +18,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 RuntimeExecutor 的线程固定、幂等、失败传播和 submitBlocking 边界。
+
 struct RuntimeEvents final
 {
     std::thread::id initializeThread;
@@ -89,6 +91,7 @@ private:
 
 void initializeRunsOnRuntimeThread()
 {
+    // 验证 initialize 被投递到 runtime executor，而不是调用方线程。
     auto events = std::make_shared<RuntimeEvents>();
     auto runtime = std::make_unique<FakeRuntime>(events);
     auto executor = std::make_shared<async::SingleThreadExecutor>("runtime-test");
@@ -155,6 +158,7 @@ void submitRunsOnRuntimeThreadAndReturnsValue()
 
 void submitFlattensReturnedFuture()
 {
+    // 验证 submit 的 Future<T> 返回值会 flatten，且等待 pending inner future。
     auto runtime = std::make_unique<FakeRuntime>();
     execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
     runtimeExecutor.initialize().get();
@@ -282,6 +286,7 @@ void submitBlockingFlattensReturnedFutureFromCaller()
 
 void submitBlockingFlattensReturnedFutureOnRuntimeThread()
 {
+    // 验证 runtime 线程 inline 分支也遵守 Future<T> flatten 语义。
     auto runtime = std::make_unique<FakeRuntime>();
     execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
     runtimeExecutor.initialize().get();
@@ -319,6 +324,7 @@ void submitBlockingPropagatesReturnedFutureExceptionOnRuntimeThread()
 
 void submitBlockingRejectsInvalidReturnedFutureOnRuntimeThread()
 {
+    // 验证 inline 分支返回 invalid future 时，错误会被外层 submit 捕获。
     auto runtime = std::make_unique<FakeRuntime>();
     execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
     runtimeExecutor.initialize().get();

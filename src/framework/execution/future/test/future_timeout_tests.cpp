@@ -21,6 +21,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 sleep/delayed/within/onTimeout 的定时、取消和 interrupt 语义。
+
 void sleepForCompletesAfterDuration()
 {
     auto future = async::sleepFor(std::chrono::milliseconds(1));
@@ -37,6 +39,7 @@ void sleepUntilCompletesAtDeadline()
 
 void timerTaskHandleCancelsScheduledTask()
 {
+    // 验证取消 timer handle 后，已入队 timer 不会再兑现 promise。
     async::TimerExecutor timer;
     std::atomic<bool> ran(false);
 
@@ -103,6 +106,7 @@ void withinPropagatesOriginalExceptionBeforeTimeout()
 
 void withinTimesOutWhenDeadlineWins()
 {
+    // 验证 timeout 先完成时，输出 future 以 FutureTimeout 失败。
     async::Promise<int> promise;
     auto future = async::within(promise.getFuture(), std::chrono::milliseconds(1));
 
@@ -125,6 +129,7 @@ void withinIgnoresLateOriginalCompletion()
 
 void withinTimeoutInterruptsOriginalPromise()
 {
+    // 验证 timeout 不强杀 producer，只通过 interrupt handler 通知原 promise。
     async::Promise<int> promise;
     std::mutex mutex;
     std::condition_variable cv;
@@ -198,6 +203,7 @@ void onTimeoutRecoversWithFallbackValue()
 
 void onTimeoutRecoversWithFallbackFuture()
 {
+    // 验证 timeout handler 返回 Future<T> 时也会 flatten。
     async::Promise<int> promise;
     auto future = async::onTimeout(
         promise.getFuture(),

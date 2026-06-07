@@ -4,6 +4,8 @@
 
 #include <vector>
 
+// execution_tests 的聚合入口；各组件测试在独立文件中说明覆盖目的。
+
 int main()
 {
     std::vector<execution_test::TestCase> tests;

@@ -21,6 +21,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 Promise/Future 的生命周期、消费语义、等待语义和中断交付。
+
 void promiseCanBeFulfilledBeforeFutureRetrieval()
 {
     async::Promise<int> promise;
@@ -33,6 +35,7 @@ void promiseCanBeFulfilledBeforeFutureRetrieval()
 
 void promiseRejectsDuplicateFutureRetrieval()
 {
+    // 验证 Promise/Future 仍保持单消费者约束。
     async::Promise<int> promise;
     auto future = promise.getFuture();
     (void)future;
@@ -44,6 +47,7 @@ void promiseRejectsDuplicateFutureRetrieval()
 
 void promiseRejectsDuplicateFulfillment()
 {
+    // 验证重复完成会被显式拒绝，避免静默覆盖结果。
     async::Promise<int> promise;
     promise.setValue(1);
 
@@ -89,6 +93,7 @@ void waitForReadyDoesNotConsumeFuture()
 
 void getForTimeoutDoesNotConsumeFuture()
 {
+    // 验证 getFor 超时后不消费 future，生产端后续完成仍可被 get 取到。
     async::Promise<int> promise;
     auto future = promise.getFuture();
 
@@ -102,6 +107,7 @@ void getForTimeoutDoesNotConsumeFuture()
 
 void getForReadyConsumesFuture()
 {
+    // 验证 getFor 成功取到就绪结果时会消费 future。
     async::Promise<int> promise;
     auto future = promise.getFuture();
     promise.setValue(42);
@@ -131,6 +137,7 @@ void futureCannotBeUsedAfterThenValue()
 
 void brokenPromiseCompletesFutureWithException()
 {
+    // 验证生产端提前销毁时，消费端不会永久等待。
     async::Future<int> future;
     {
         async::Promise<int> promise;
@@ -164,6 +171,7 @@ void cancelAfterHandlerNotifiesProducer()
 
 void cancelBeforeHandlerIsDeliveredWhenHandlerIsSet()
 {
+    // 验证处理器晚注册时仍能收到之前保存的 cancel。
     async::Promise<int> promise;
     auto future = promise.getFuture();
     bool interrupted = false;
@@ -224,6 +232,7 @@ void cancelAfterFulfilledDoesNothing()
 
 void interruptHandlerRunsOutsideSharedStateLock()
 {
+    // 验证中断处理器不在 SharedState 锁内执行，处理器中重入 setValue 不会死锁。
     async::Promise<int> promise;
     auto future = promise.getFuture();
 

@@ -15,6 +15,7 @@ template <typename Args, typename Result, typename Merger>
 class MergeLane final
 {
 public:
+    // Merger 决定 waiting 任务能否合并；active 任务始终不会被合并或替换。
     using Runner = std::function<async::Future<Result>(Args)>;
 
     MergeLane(Runner runner, Merger merger)
@@ -45,6 +46,7 @@ public:
             } else if (!m_state->waiting.has_value()) {
                 m_state->waiting = std::move(pending);
             } else if (m_state->merger.canMerge(m_state->waiting->args, pending.args)) {
+                // 合并成功时旧 waiting future 以 TaskSuperseded 结束，新 waiting 继承合并后的 args。
                 superseded = std::move(m_state->waiting);
                 pending.args = m_state->merger.merge(superseded->args, std::move(pending.args));
                 m_state->waiting = std::move(pending);
@@ -74,6 +76,7 @@ public:
                 return;
             }
             m_state->shutdown = true;
+            // shutdown 只拒绝未启动的 waiting；active 任务继续由 runner future 兑现。
             waiting = std::move(m_state->waiting);
             m_state->waiting.reset();
         }
@@ -110,6 +113,7 @@ private:
     {
         async::Future<Result> work;
         try {
+            // runner 在锁外执行；异常和 invalid future 都转为提交方可观察的 failed future。
             work = state->runner(std::move(pending.args));
             if (!work.valid()) {
                 throw async::FutureInvalid();
@@ -122,6 +126,7 @@ private:
 
         std::move(work).thenTry([state, promise = pending.promise](async::Try<Result> &&result) {
             promise->setTry(std::move(result));
+            // active 完成后最多启动一个合并后的 waiting。
             startNext(state);
             return async::Unit();
         });

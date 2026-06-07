@@ -32,6 +32,7 @@ public:
             return async::makeExceptionFuture<Result>(std::make_exception_ptr(TaskRejected()));
         }
 
+        // 用 ready future 作为统一入口，借助 thenValue 支持普通值、void 和 Future<T> flatten。
         return async::makeReadyFuture()
             .via(m_executor)
             .thenValue(std::forward<F>(func));
@@ -48,6 +49,7 @@ public:
     }
 
 private:
+    // executor 只负责实际调度；shutdown 是 scheduler 自己的提交闸门。
     std::shared_ptr<async::Executor> m_executor;
     std::atomic<bool> m_shutdown { false };
 };

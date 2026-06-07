@@ -10,6 +10,7 @@
 
 namespace async
 {
+// 将 callable 投递到 executor，并把普通值、void、Future<T> 统一提升为 Future<T>。
 template <typename F>
 auto async(std::shared_ptr<Executor> executor, F &&func)
     -> Future<typename detail::FutureValue<std::invoke_result_t<F>>::Type>
@@ -28,6 +29,7 @@ auto async(std::shared_ptr<Executor> executor, F &&func)
         });
     });
     if (!scheduled) {
+        // 初始投递失败也要立即兑现 future，避免 caller 阻塞在 get()。
         promiseHolder->setException(std::make_exception_ptr(ExecutorRejected()));
     }
 

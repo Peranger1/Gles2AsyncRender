@@ -25,6 +25,7 @@ struct TimeoutContext final
     Promise<T> promise;
     std::mutex mutex;
     TimerTaskHandle timer;
+    // 原 future 和 timer 竞争完成，completed 防止双重兑现。
     bool completed = false;
 };
 
@@ -79,6 +80,7 @@ Future<Unit> sleepFor(std::chrono::duration<Rep, Period> duration)
         promiseHolder->setValue();
     });
     if (!timer.scheduled()) {
+        // timer executor 已关闭或拒绝时，sleep future 必须立即失败。
         promiseHolder->setException(std::make_exception_ptr(ExecutorRejected()));
     }
 
@@ -102,6 +104,7 @@ Future<T> within(Future<T> future, std::chrono::duration<Rep, Period> timeout)
     Future<T> output = context->promise.getFuture();
     InterruptHandle interruptHandle = future.interruptHandle();
 
+    // 原 future 先完成时取消 timer，并原样传递成功值或异常。
     std::move(future).thenTry([context](Try<T> &&result) {
         TimerTaskHandle timerToCancel;
         if (detail::tryCompleteFromFuture(context, &timerToCancel)) {
@@ -117,6 +120,7 @@ Future<T> within(Future<T> future, std::chrono::duration<Rep, Period> timeout)
             std::exception_ptr timeoutException = std::make_exception_ptr(FutureTimeout());
             if (detail::tryCompleteFromTimer(context)) {
                 context->promise.setException(timeoutException);
+                // timeout 只通知 producer；是否停止底层任务由 interrupt handler 决定。
                 interruptHandle.raise(timeoutException);
             }
         });
@@ -147,6 +151,7 @@ Future<T> delayed(Future<T> future, std::chrono::duration<Rep, Period> delay)
 
     return std::move(future).thenTry([delay](Try<T> &&result) {
         auto resultHolder = std::make_shared<Try<T>>(std::move(result));
+        // 延迟只改变交付时间，不改变原 future 的值或异常。
         return sleepFor(delay).thenValue([resultHolder]() mutable {
             return std::move(*resultHolder).value();
         });

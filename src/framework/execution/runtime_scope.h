@@ -7,6 +7,7 @@
 class RuntimeScope final
 {
 public:
+    // RuntimeScope 只负责 enter/leave 配对，不负责 runtime 的 initialize/shutdown。
     RuntimeScope(IRuntime *runtime, QString *error);
     ~RuntimeScope();
 

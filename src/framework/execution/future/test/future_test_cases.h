@@ -6,6 +6,7 @@
 
 namespace async_future_test
 {
+// async_future_tests 按 future 子能力拆分，聚合入口按这里的声明收集用例。
 std::vector<execution_test::TestCase> lifecycleTestCases();
 std::vector<execution_test::TestCase> continuationTestCases();
 std::vector<execution_test::TestCase> executorTestCases();

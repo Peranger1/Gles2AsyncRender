@@ -46,10 +46,12 @@ struct TimerExecutorState final
                         std::vector<std::shared_ptr<TimerTask>>,
                         TimerTaskCompare> tasks;
     bool stopping = false;
+    // deadline 相同时用 sequence 保持稳定顺序，避免 priority_queue 中同 deadline 任务抖动。
     std::size_t nextSequence = 0;
 };
 }
 
+// TimerTaskHandle 只取消尚未执行的 timer；已触发的任务不会被回滚。
 class TimerTaskHandle final
 {
 public:
@@ -101,6 +103,7 @@ public:
         task->cancelled.store(true);
         std::shared_ptr<detail::TimerExecutorState> state = m_state.lock();
         if (state) {
+            // 唤醒 worker，让它尽快跳过已取消的堆顶任务。
             state->cv.notify_one();
         }
     }
@@ -246,6 +249,7 @@ private:
 
                     std::shared_ptr<detail::TimerTask> next = state->tasks.top();
                     if (next->cancelled.load()) {
+                        // 取消采用懒删除，worker 取到堆顶时再丢弃。
                         state->tasks.pop();
                         continue;
                     }

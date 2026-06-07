@@ -4,6 +4,8 @@
 
 #include <vector>
 
+// async_future_tests 的聚合入口；具体测试目的写在各拆分测试文件中。
+
 int main()
 {
     std::vector<execution_test::TestCase> tests;

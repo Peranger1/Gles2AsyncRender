@@ -16,6 +16,7 @@ class Executor
 {
 public:
     virtual ~Executor() = default;
+    // 返回 false 表示 executor 拒绝任务；调用方需要把对应 future 兑现为失败。
     virtual bool add(std::function<void()> task) = 0;
 
     virtual bool isShutdown() const
@@ -44,6 +45,7 @@ public:
         }
 
         try {
+            // InlineExecutor 作为 fallback 使用，吞掉 task 异常避免越过 executor 边界。
             task();
         } catch (...) {
         }
@@ -119,6 +121,7 @@ public:
 
         if (task) {
             try {
+                // 测试用 executor：调用方显式 drain 才运行队列中的任务。
                 task();
             } catch (...) {
             }
@@ -171,6 +174,7 @@ public:
             }
             m_state->tasks.push(std::move(task));
             if (!m_state->running) {
+                // 只让第一个入队任务调度 drain，后续任务由同一轮 drain 串行取走。
                 m_state->running = true;
                 shouldSchedule = true;
             }
@@ -249,6 +253,7 @@ private:
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 if (state->shutdown || state->tasks.empty()) {
+                    // 队列耗尽后释放 running，下一次 add 才会调度新的 drain。
                     state->running = false;
                     return;
                 }
@@ -438,6 +443,7 @@ public:
             return;
         }
         if (m_worker.get_id() == std::this_thread::get_id()) {
+            // 从 worker 自身 shutdown 时不能 join 自己，只能 detach 后让调用栈自然退出。
             m_worker.detach();
             return;
         }

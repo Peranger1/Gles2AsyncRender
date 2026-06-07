@@ -21,6 +21,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 ready/exception future、Try 取值，以及 collect 系列组合器。
+
 void tryValueRethrowsStoredException()
 {
     async::Try<int> result = async::Try<int>::fromException(
@@ -69,6 +71,7 @@ void collectAllEmptyReturnsReadyEmptyVector()
 
 void collectAllPreservesValuesAndExceptions()
 {
+    // 验证 collectAll 保留每个输入的 Try，不因中间异常提前失败。
     std::vector<async::Future<int>> futures;
     futures.push_back(async::makeReadyFuture(10));
     futures.push_back(async::makeExceptionFuture<int>(
@@ -226,6 +229,7 @@ void collectAnyRejectsInvalidFuture()
 
 void collectAnyUsesFirstReadyFutureInInputOrder()
 {
+    // 验证多个输入已 ready 时，collectAny 按输入顺序选择第一个。
     std::vector<async::Future<int>> futures;
     futures.push_back(async::makeReadyFuture(10));
     futures.push_back(async::makeReadyFuture(32));

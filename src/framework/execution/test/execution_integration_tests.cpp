@@ -10,8 +10,11 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 TaskScheduler 与各类 Lane 组合后的真实调度链路。
+
 void taskSchedulerFeedsSerialLaneWithoutRunningAhead()
 {
+    // 验证 ManualExecutor 未 drain 前，SerialLane 不会提前启动后续任务。
     auto executor = std::make_shared<async::ManualExecutor>();
     execution::TaskScheduler scheduler(executor);
     std::vector<int> started;
@@ -52,6 +55,7 @@ void taskSchedulerFeedsSerialLaneWithoutRunningAhead()
 
 void taskSchedulerFeedsLatestLaneWithSupersededWaitingWork()
 {
+    // 验证 LatestLane 被 TaskScheduler 驱动时，superseded waiting 不会进入 executor。
     auto executor = std::make_shared<async::ManualExecutor>();
     execution::TaskScheduler scheduler(executor);
     std::vector<int> started;
@@ -106,6 +110,7 @@ struct SumMerger final
 
 void taskSchedulerFeedsMergeLaneWithMergedWaitingWork()
 {
+    // 验证 MergeLane 被 TaskScheduler 驱动时，只运行 active 和合并后的 waiting。
     auto executor = std::make_shared<async::ManualExecutor>();
     execution::TaskScheduler scheduler(executor);
     std::vector<int> started;

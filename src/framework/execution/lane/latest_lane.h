@@ -14,6 +14,7 @@ namespace execution
 enum class LatestLaneDelivery
 {
     DeliverActiveResult,
+    // 如果 active 完成时已经有 newer waiting，active 结果会被标记为 TaskStale。
     MarkActiveStaleWhenWaiting
 };
 
@@ -23,6 +24,7 @@ template <typename Args,
 class LatestLane final
 {
 public:
+    // runner 必须返回有效 future；LatestLane 只管理等待任务的替换策略。
     using Runner = std::function<async::Future<Result>(Args)>;
 
     explicit LatestLane(Runner runner)
@@ -51,6 +53,7 @@ public:
                 shouldStart = true;
             } else {
                 if (m_state->waiting.has_value()) {
+                    // waiting 只保留最新一个；旧 waiting 在锁外兑现为 TaskSuperseded。
                     superseded = std::move(m_state->waiting);
                 }
                 m_state->waiting = std::move(pending);
@@ -75,6 +78,7 @@ public:
                 return;
             }
             m_state->shutdown = true;
+            // shutdown 不取消 active，只拒绝尚未启动的 latest waiting。
             waiting = std::move(m_state->waiting);
             m_state->waiting.reset();
         }
@@ -109,6 +113,7 @@ private:
     {
         async::Future<Result> work;
         try {
+            // runner 可能抛异常或返回 invalid future；这两种情况都要清理 active 状态。
             work = state->runner(std::move(pending.args));
             if (!work.valid()) {
                 throw async::FutureInvalid();
@@ -125,6 +130,7 @@ private:
             } else {
                 promise->setTry(std::move(result));
             }
+            // 无论 active 结果是否 stale，都要继续启动最新 waiting。
             startNext(state);
             return async::Unit();
         });

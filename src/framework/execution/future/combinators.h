@@ -59,6 +59,7 @@ struct CollectAllContext final
     }
 
     std::mutex mutex;
+    // remaining/completed 共同防止最后一个结果之外的路径重复兑现 promise。
     std::size_t remaining = 0;
     std::vector<Try<T>> results;
     Promise<std::vector<Try<T>>> promise;
@@ -90,6 +91,7 @@ Future<std::vector<Try<T>>> collectAll(std::vector<Future<T>> futures)
     auto context = std::make_shared<detail::CollectAllContext<T>>(futures.size());
     Future<std::vector<Try<T>>> output = context->promise.getFuture();
 
+    // collectAll 保留每个输入的 Try，不因单个异常提前失败。
     for (std::size_t i = 0; i < futures.size(); ++i) {
         std::move(futures[i]).thenTry([context, i](Try<T> &&result) {
             bool shouldComplete = false;
@@ -150,6 +152,7 @@ Future<std::pair<std::size_t, Try<T>>> collectAny(std::vector<Future<T>> futures
     auto context = std::make_shared<detail::CollectAnyContext<T>>();
     Future<Result> output = context->promise.getFuture();
 
+    // 第一个完成的输入胜出；成功和异常都会作为 Try 一并返回。
     for (std::size_t i = 0; i < futures.size(); ++i) {
         std::move(futures[i]).thenTry([context, i](Try<T> &&result) {
             std::optional<Result> completedResult;

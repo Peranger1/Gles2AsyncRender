@@ -21,6 +21,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 thenValue/thenTry/thenError/ensure 的传播、恢复和 flatten 语义。
+
 void thenValueTransformsSuccessfulResult()
 {
     async::Promise<int> promise;
@@ -84,6 +86,7 @@ void typedThenErrorLeavesMismatchedException()
 
 void typedThenErrorFlattensReturnedFuture()
 {
+    // 验证 typed error handler 返回 Future<T> 时，下游类型仍是 Future<T>。
     auto future = async::makeExceptionFuture<int>(
         std::make_exception_ptr(std::runtime_error("typed")))
         .thenError<std::runtime_error>([](const std::runtime_error &) {
@@ -130,6 +133,7 @@ void readyFutureRunsContinuationWhenAttached()
 
 void thenValueFlattensReturnedFuture()
 {
+    // 验证 thenValue 返回 Future<T> 时会 flatten，而不是生成嵌套 future。
     auto executor = async::InlineExecutor::instance();
     auto future = async::async(executor, []() {
         return 10;
@@ -222,6 +226,7 @@ void ensureExceptionOverridesOriginalResult()
 
 void ensureRunsThroughViaExecutor()
 {
+    // 验证 ensure 和普通 continuation 一样遵守 via 设置的 executor。
     auto executor = std::make_shared<async::ManualExecutor>();
     async::Promise<int> promise;
     bool cleanupRan = false;

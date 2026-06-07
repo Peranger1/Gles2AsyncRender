@@ -61,6 +61,7 @@ public:
                 return;
             }
 
+            // 已经收到过 interrupt 时，在注册 handler 后补投递一次。
             handlerToRun = m_interruptHandler;
             interruptToDeliver = m_interrupt;
         }
@@ -83,6 +84,7 @@ public:
 
             m_interrupt = interrupt;
             if (!m_interruptHandler) {
+                // handler 尚未注册时先保存 interrupt，后续 setInterruptHandler 会补投递。
                 return;
             }
             handlerToRun = m_interruptHandler;
@@ -118,6 +120,7 @@ public:
         }
 
         if (callback) {
+            // 用户 callback 在锁外调度，避免 continuation 重入 shared state 锁。
             const bool scheduled = detail::schedule(executor, [callback = std::move(callback), resultForCallback]() mutable {
                 callback(std::move(*resultForCallback));
             });
@@ -143,12 +146,14 @@ public:
                 readyResult = std::make_shared<Try<T>>(std::move(*m_result));
                 m_result.reset();
             } else {
+                // 未完成时只保存 callback；真正执行发生在 setResult 的锁外阶段。
                 m_callback = std::move(callback);
                 m_scheduleFailure = std::move(scheduleFailure);
                 return;
             }
         }
 
+        // 已完成的 future 追加 callback 时，同样通过 executor 调度，不在锁内直接执行。
         const bool scheduled = detail::schedule(executor, [callback = std::move(callback), readyResult]() mutable {
             callback(std::move(*readyResult));
         });

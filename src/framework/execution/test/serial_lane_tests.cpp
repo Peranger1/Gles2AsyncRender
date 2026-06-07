@@ -14,6 +14,8 @@ namespace
 using execution_test::require;
 using execution_test::requireThrows;
 
+// 本文件覆盖 SerialLane 的 FIFO、runner 失败和 shutdown 等串行队列行为。
+
 void serialLaneRunsOneTaskAtATimeInOrder()
 {
     std::vector<int> started;
@@ -56,6 +58,7 @@ void serialLanePropagatesRunnerFailure()
 
 void serialLaneRunnerThrowStartsNextWaitingTask()
 {
+    // 验证 runner 抛异常后 active 状态会释放，后续 waiting 仍能继续执行。
     std::vector<int> started;
     std::vector<std::shared_ptr<async::Promise<int>>> completions;
 
@@ -89,6 +92,7 @@ void serialLaneRunnerThrowStartsNextWaitingTask()
 
 void serialLaneInvalidRunnerFutureStartsNextWaitingTask()
 {
+    // 验证 runner 返回 invalid future 后也不会卡住 lane。
     std::vector<int> started;
     std::vector<std::shared_ptr<async::Promise<int>>> completions;
 
