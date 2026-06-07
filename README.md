@@ -37,7 +37,7 @@
   - execution 层只负责 GL context 中的 `void(IRuntime *)` 顺序执行
   - 每个提交到 execution 层的 GL task 最多只调用一个 `photo_editor_*`
   - 合并、丢弃、latest-only 和 process-again 策略由 per-handle actor 管理
-  - CPU 预览直接同步执行，不进入 lane
+  - CPU 预览直接同步执行，不进入 runtime executor
 
 ## 当前架构
 
@@ -56,11 +56,9 @@
   - `async::Future` / `async::Promise`
   - `async::Executor`
   - `execution::TaskScheduler`
+  - `execution::ExecutorShutdown` / `execution::TaskRejected`
   - `RuntimeScope`
   - `RuntimeExecutor`
-  - `SerialLane`
-  - `LatestLane`
-  - `MergeLane`
 
 - `app`
   - `TexturePresentWidget`
@@ -117,12 +115,9 @@
   - 提供 `initialize()`、`submit()`、`submitBlocking()` 和 `shutdown()`
   - 不包含 photo editor 业务类型或合并策略
 
-- [src/framework/execution/async_lane.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/async_lane.h)
-  - 通用异步执行 lane
-  - 通过模板参数选择 queue policy、delivery policy、waiting merger
-  - 内置 `ImmediateQueue`、`SerialQueue<N>`、`MergeWhileBusyQueue<N>`
-  - 内置 `DeliverEveryStartedResult`、`DropStaleStartedResults`
-  - 内置 `RejectMerge`、`ReplaceWaitingWithIncoming`
+- [src/framework/execution/execution_common.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/execution_common.h)
+  - execution 层通用异常
+  - `ExecutorShutdown` / `TaskRejected`
 
 - [src/framework/platform/win_angle_d3d11/win_angle_runtime.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_runtime.cpp)
   - Windows worker ANGLE runtime
@@ -175,13 +170,12 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 
 ## 当前调度与展示语义
 
-- GPU 预览主路径已经从 `AsyncLane<GpuPreviewRequest, ...>` 迁移到 per-handle actor：
+- GPU 预览主路径使用 per-handle actor：
   - `execution::RuntimeExecutor` 拥有 runtime，并按提交顺序执行 `IRuntime&` task
   - `PhotoEditorRuntimeService` 负责 `photo_editor_init` 和 actor 生命周期
   - `PhotoEditorHandleActor` 负责 handle 状态、latest-only 参数、process-again 和 generation 防护
   - `setOutputSize()`、`setOpcode()`、`process()` 支持跨线程调用
   - SDK callback 到达后由 actor 投递独立 `photo_editor_render` task
-- `AsyncLane` / `SyncLane` 仍保留在 execution 层，但不再是 photo editor GPU 预览主路径。
 - 平台纹理发布不是 latest-only：
   - `D3D11SharedTextureSlots` 维护多 `Ready` 槽队列
   - `IWriter::submitTexture()` 通过已 attach 的 `execution::RuntimeExecutor` 同步进入 runtime 线程发布纹理
@@ -200,11 +194,11 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 
 - [docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/FRAMEWORK_RESTRUCTURE_HEADER_LAYOUT.md)
   - 历史重构记录，不是当前框架的正式文档
-  - 其中关于 `request_channel` / `request_dispatcher` / `photo_editor_demo_handlers` 的表述已过时
+  - 其中关于 `request_channel` / `request_dispatcher` / `photo_editor_demo_handlers` / `AsyncLane` 的表述已过时
 
 - [docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md](/D:/Desktop/AI-Agent/Gles2AsyncRender/docs/CROSS_PLATFORM_ASYNC_RENDER_FRAMEWORK_DESIGN.md)
   - 历史方案文档，不是当前框架的正式文档
-  - 其中部分 `framework/core` / `framework/qt` / `FrameTicket` / `SerialConflatedLane` 表述属于历史设计，不是当前代码最终命名
+  - 其中部分 `framework/core` / `framework/qt` / `FrameTicket` / `SerialConflatedLane` 表述属于历史设计，不是当前代码最终命名或当前保留实现
 
 正式文档边界：
 

@@ -7,11 +7,7 @@ QT -= core gui
 INCLUDEPATH += $$PWD/../../..
 
 SOURCES += \
-    execution_integration_tests.cpp \
     execution_tests.cpp \
-    latest_lane_tests.cpp \
-    merge_lane_tests.cpp \
-    serial_lane_tests.cpp \
     task_scheduler_tests.cpp
 
 HEADERS += \
@@ -29,9 +25,6 @@ HEADERS += \
     ../future/timeout.h \
     ../future/try.h \
     ../future/unit.h \
+    ../execution_common.h \
     ../execution.h \
-    ../lane/lane_exceptions.h \
-    ../lane/latest_lane.h \
-    ../lane/merge_lane.h \
-    ../lane/serial_lane.h \
     ../task_scheduler.h

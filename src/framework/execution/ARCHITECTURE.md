@@ -5,9 +5,9 @@
 ## 设计目标
 
 - 统一异步结果表达：所有异步任务返回 `async::Future<T>`。
-- 分离执行位置和排队策略：executor 只回答“在哪运行”，lane 只回答“同类任务如何串行、替换或合并”。
+- 分离执行位置和业务流控：executor 只回答“在哪运行”，同类业务请求如何串行、替换或合并由业务 actor/mailbox 决定。
 - 让 runtime 线程亲和性显式化：`RuntimeExecutor` 把 `IRuntime` 绑定到单独的 `SingleThreadExecutor`。
-- 保持通用层无平台依赖：`future`、`TaskScheduler`、lane 不依赖 Qt、OpenGL、EGL 或 `IRuntime`。
+- 保持通用层无平台依赖：`future` 和 `TaskScheduler` 不依赖 Qt、OpenGL、EGL 或 `IRuntime`。
 - 让失败沿 future 传播：拒绝、关闭、超时、业务异常都通过 exception 进入 `Future<T>`。
 
 ## 分层
@@ -22,11 +22,8 @@ Runtime 适配层
   execution::RuntimeExecutor
   RuntimeScope
 
-调度与流控层
+通用提交层
   execution::TaskScheduler
-  execution::SerialLane
-  execution::LatestLane
-  execution::MergeLane
 
 异步基础层
   async::Future / Promise / Try / Unit
@@ -34,12 +31,12 @@ Runtime 适配层
   collect / timeout / splitter 等 combinator
 ```
 
-`execution.h` 只聚合通用调度与 lane 能力。`runtime_executor.h` 单独存在，因为它引入 `IRuntime`、`QString` 和平台 runtime 生命周期。
+`execution.h` 只聚合通用 future、异常与 scheduler 能力。`runtime_executor.h` 单独存在，因为它引入 `IRuntime`、`QString` 和平台 runtime 生命周期。
 
 ## Namespace 边界
 
 - `async`：独立 C++17 future/executor 模型，只依赖标准库。
-- `execution`：项目执行策略，包含 scheduler、lane、runtime adapter 和 execution 相关异常。
+- `execution`：项目执行策略，包含 scheduler、runtime adapter 和 execution 相关异常。
 - 全局命名空间：`RuntimeScope` 当前仍在全局命名空间，作为 `IRuntime::enter()` / `leave()` 的 RAII 辅助对象。
 
 ## 数据流
@@ -64,16 +61,6 @@ runtime 任务：
   -> Future<Result>
 ```
 
-连续任务流：
-
-```text
-调用方 submit(args)
-  -> Lane 判断 active/waiting 状态
-  -> runner(args) 返回 Future<Result>
-  -> runner 完成后兑现原 submit 返回的 promise
-  -> Lane 启动下一条 waiting 任务
-```
-
 ## 线程模型
 
 - `InlineExecutor` 立即在当前调用栈执行任务。
@@ -94,23 +81,14 @@ execution 层不返回状态结构。失败被写入 `Future<T>`，调用方通�
 - `async::FutureInvalid`：future 已被消费、无状态或输入 future 非法。
 - `async::BrokenPromise`：producer 销毁时还没有完成 promise。
 - `async::FutureTimeout`：`within()` 超时胜出。
-- `execution::ExecutorShutdown`：scheduler、lane 或 runtime executor 已关闭。
-- `execution::TaskRejected`：任务无法被当前策略接受。
-- `execution::TaskSuperseded`：等待中的任务被更新任务替换。
-- `execution::TaskStale`：active 任务完成时已经有更新任务等待，结果被标记为过期。
+- `execution::ExecutorShutdown`：scheduler 或 runtime executor 已关闭。
+- `execution::TaskRejected`：任务无法被当前 executor/scheduler 接受。
 - `execution::RuntimeUnavailable`：runtime 或 runtime executor 不可用。
 - `execution::RuntimeInitializeFailed`：`IRuntime::initialize()` 返回失败。
 
-## Lane 语义
+## 业务流控
 
-| 类型 | active 任务 | waiting 任务 | 新任务到达时行为 |
-| --- | --- | --- | --- |
-| `SerialLane` | 最多 1 个 | FIFO 队列 | 全部保留，按提交顺序执行 |
-| `LatestLane` | 最多 1 个 | 最多 1 个 | 新任务替换 waiting，旧 waiting 得到 `TaskSuperseded` |
-| `LatestLane<..., MarkActiveStaleWhenWaiting>` | 最多 1 个 | 最多 1 个 | active 完成时若已有 waiting，则 active 结果得到 `TaskStale` |
-| `MergeLane` | 最多 1 个 | 最多 1 个 | 若 merger 允许，则合并 waiting 和新任务；否则新任务得到 `TaskRejected` |
-
-Lane 的 runner 必须返回有效 `Future<Result>`。runner 抛异常或返回 invalid future 时，当前 submit 对应的 future 直接失败，并继续尝试调度下一条任务。
+execution 层不再提供 lane。photo editor 的 latest-only、process-again、destroy 优先级和 generation 防护由 `PhotoEditorHandleActor` 实现；平台纹理发布容量由 writer/reader 交换链路处理。这样 runtime executor 保持与 folly executor 类似的边界：只负责执行位置和顺序，不理解业务请求类型。
 
 ## Runtime 生命周期
 

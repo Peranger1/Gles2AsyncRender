@@ -26,7 +26,7 @@
 - [x] 阅读并确认当前 `PhotoEditorAppSession::runGpuPreviewStep()` 主路径。
 - [x] 标记当前所有直接调用 `photo_editor_*` 的位置。
 - [x] 确认 `RuntimeHost` / `QtRuntimeHost` 保持可复用，不在本轮重构中重写平台 runtime。
-- [x] 确认 `AsyncLane` / `SyncLane` 暂时保留，但 photo editor 主路径完成后不再依赖它们。
+- [x] 确认 `AsyncLane` / `SyncLane` 已删除，photo editor 主路径不再依赖它们。
 - [x] 确认 `photo_editor_gles2_backend.*` 的 C 风格 API 不在本轮重构中改变。
 
 完成标准：

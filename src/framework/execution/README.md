@@ -1,16 +1,16 @@
 # Execution
 
-本目录是项目的新异步执行层。它把“任务怎么完成”“任务在哪个线程执行”“连续提交的任务如何排队或合并”拆成独立概念，避免业务层继续依赖旧的 `RuntimeHost` 回调式模型。
+本目录是项目的新异步执行层。它把“任务怎么完成”和“任务在哪个线程执行”拆成独立概念，避免业务层继续依赖旧的 `RuntimeHost` 回调式模型。连续业务请求的替换、合并和丢弃策略由业务 actor/mailbox 管理。
 
 ## 文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)：说明 execution 层的分层、边界、线程模型和错误模型。
-- [IMPLEMENTATION.md](IMPLEMENTATION.md)：说明 future、executor、lane、runtime adapter 的实现细节和约束。
+- [IMPLEMENTATION.md](IMPLEMENTATION.md)：说明 future、executor、runtime adapter 的实现细节和约束。
 
 ## 入口头
 
 - `framework/execution/future/async_future.h`：只使用 future/executor 能力时包含它。
-- `framework/execution/execution.h`：使用通用 scheduler 和 lane 时包含它。
+- `framework/execution/execution.h`：使用通用 scheduler 和 execution 异常时包含它。
 - `framework/execution/runtime_executor.h`：需要访问 `IRuntime` 时直接包含它。
 
 `execution.h` 不包含 `runtime_executor.h`，这样通用 execution 代码不会被 Qt 字符串和平台 runtime 接口污染。
@@ -21,7 +21,6 @@
 - `async::Executor`：continuation 或任务实际运行的位置。
 - `async::async(executor, func)`：把 callable 投递到 executor，并把普通值、`void` 或 `Future<T>` 返回值统一转换为 `Future<T>`。
 - `execution::TaskScheduler`：把普通函数提交到指定 executor，并返回 `Future<T>`。
-- `execution::SerialLane` / `LatestLane` / `MergeLane`：描述同一类任务连续提交时的排队、替换、合并策略。
 - `execution::RuntimeExecutor`：拥有一个 `IRuntime`，并把所有 runtime 调用固定到一个 `SingleThreadExecutor`。
 
 ## 测试入口
@@ -29,7 +28,7 @@
 当前测试仍使用手写 runner，不依赖 QtTest：
 
 - `async_future_tests`：future、promise、executor、combinator、timeout、splitter。
-- `execution_tests`：TaskScheduler、SerialLane、LatestLane、MergeLane，以及 `TaskScheduler + Lane` 的集成链路。
+- `execution_tests`：TaskScheduler。
 - `runtime_executor_tests`：RuntimeExecutor 初始化、提交、同步提交、shutdown 和返回 `Future<T>` 的 flatten 边界。
 
 ## 最小示例

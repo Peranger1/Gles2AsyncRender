@@ -34,7 +34,6 @@ add_executable(Gles2AsyncRender
     src/framework/backend/win_angle_d3d11/gles2_shader_utils.h
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h
-    src/framework/execution/async_lane.h
     src/framework/execution/future/async.h
     src/framework/execution/future/async_future.h
     src/framework/execution/future/combinators.h
@@ -50,15 +49,10 @@ add_executable(Gles2AsyncRender
     src/framework/execution/future/unit.h
     src/framework/execution/execution.h
     src/framework/execution/execution_common.h
-    src/framework/execution/lane/lane_exceptions.h
-    src/framework/execution/lane/latest_lane.h
-    src/framework/execution/lane/merge_lane.h
-    src/framework/execution/lane/serial_lane.h
     src/framework/execution/runtime_executor.cpp
     src/framework/execution/runtime_executor.h
     src/framework/execution/runtime_scope.cpp
     src/framework/execution/runtime_scope.h
-    src/framework/execution/sync_lane.h
     src/framework/execution/task_scheduler.h
     src/framework/platform/platform_backend.h
     src/framework/platform/platform_backend_factory.cpp
@@ -145,11 +139,7 @@ if (BUILD_TESTING)
     add_test(NAME async_future_tests COMMAND async_future_tests)
 
     add_executable(execution_tests
-        src/framework/execution/test/execution_integration_tests.cpp
         src/framework/execution/test/execution_tests.cpp
-        src/framework/execution/test/latest_lane_tests.cpp
-        src/framework/execution/test/merge_lane_tests.cpp
-        src/framework/execution/test/serial_lane_tests.cpp
         src/framework/execution/test/task_scheduler_tests.cpp
     )
 

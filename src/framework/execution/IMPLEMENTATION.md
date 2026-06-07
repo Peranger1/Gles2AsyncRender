@@ -109,46 +109,6 @@ makeReadyFuture()
 
 如果 scheduler 已 shutdown，返回保存 `ExecutorShutdown` 的 failed future。如果 executor 为空，返回保存 `TaskRejected` 的 failed future。
 
-## Lane 实现
-
-三种 lane 都以 `std::shared_ptr<State>` 保存共享状态，保证 lane 对象移动或外部 future continuation 晚完成时状态仍然有效。
-
-共有状态：
-
-- `std::mutex mutex`
-- `Runner runner`
-- `bool active`
-- `bool shutdown`
-- waiting 容器
-
-`submit()` 只在锁内决定状态转换，不在锁内调用 runner。runner 返回的 future 完成后，`thenTry()` 兑现 submit 对应的 promise，然后调用 `startNext()`。
-
-### SerialLane
-
-waiting 是 `std::deque<Pending>`。active 任务运行时，新任务全部排队。active 完成后取队首继续执行。
-
-### LatestLane
-
-waiting 是 `std::optional<Pending>`。active 任务运行时，新任务替换旧 waiting。被替换的 waiting promise 得到 `TaskSuperseded`。
-
-`LatestLaneDelivery::MarkActiveStaleWhenWaiting` 会在 active 结果完成时检查是否存在 waiting。如果存在，active promise 得到 `TaskStale`，避免过期结果继续向业务层传播。
-
-### MergeLane
-
-waiting 是 `std::optional<Pending>`。当已有 waiting 时，新任务先调用：
-
-```cpp
-merger.canMerge(waiting.args, incoming.args)
-```
-
-如果允许合并，旧 waiting promise 得到 `TaskSuperseded`，新 waiting args 变成：
-
-```cpp
-merger.merge(oldArgs, incomingArgs)
-```
-
-如果不能合并，新任务 promise 得到 `TaskRejected`。
-
 ## RuntimeExecutor
 
 `RuntimeExecutor` 内部 `State` 包含：
@@ -187,7 +147,7 @@ merger.merge(oldArgs, incomingArgs)
 
 - 不要在通用 execution 头里引入 Qt 或平台 GL 头。
 - 新的异步 API 应返回 `async::Future<T>`，不要恢复 callback result struct。
-- lane 的 runner 不应返回 invalid future；需要拒绝时返回 failed future。
+- 业务请求的 latest-only、合并、丢弃和 stale 过滤应放在 actor/mailbox 或平台交换链路，不放在 execution 层。
 - 在 runtime thread 上不要调用会等待同一 runtime executor 的同步方法，除非方法像 `submitBlocking()` 一样显式处理了重入。
 - `Future<T>` 是单消费者；需要多消费者时使用 `FutureSplitter<T>`，并确认 T 可拷贝。
 - shutdown 路径应优先显式调用并观察结果，析构里的 shutdown 只是兜底。

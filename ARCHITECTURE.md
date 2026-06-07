@@ -11,8 +11,7 @@
 - `framework/execution`
   - runtime host
   - GL task 执行器
-  - 可选 lane 调度
-  - sync / async 调用基础设施
+  - future / executor 调用基础设施
 - `app`
   - `QOpenGLWidget`
   - UI 显示与业务 glue
@@ -65,7 +64,7 @@
 ### `src/framework/execution`
 
 - `execution_common.h`
-  - execution 聚合兼容头
+  - execution 通用异常
 
 - `runtime_scope.*`
   - `IRuntime::enter()/leave()` 的 RAII 包装
@@ -77,11 +76,7 @@
   - 不包含 photo editor 业务类型、合并策略或结果发布逻辑
 
 - `execution.h`
-  - 聚合 `Future`、`TaskScheduler`、`SerialLane`、`LatestLane`、`MergeLane`
-
-- `sync_lane.h`
-  - 同步 lane 基础接口
-  - 当前项目中尚未成为主路径
+  - 聚合 `Future`、通用异常和 `TaskScheduler`
 
 执行层只负责“在哪执行”。photo editor 主路径中，合并、丢弃、latest-only、process-again、generation 防护和结果发布都位于业务层或平台层；execution 层不持有 `IWriter`，也不理解 `photo_editor_*` 业务语义。
 

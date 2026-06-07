@@ -36,7 +36,6 @@ HEADERS += \
     src/framework/backend/win_angle_d3d11/gles2_proc_table.h \
     src/framework/backend/win_angle_d3d11/gles2_shader_utils.h \
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.h \
-    src/framework/execution/async_lane.h \
     src/framework/execution/future/async.h \
     src/framework/execution/future/async_future.h \
     src/framework/execution/future/combinators.h \
@@ -52,13 +51,8 @@ HEADERS += \
     src/framework/execution/future/unit.h \
     src/framework/execution/execution.h \
     src/framework/execution/execution_common.h \
-    src/framework/execution/lane/lane_exceptions.h \
-    src/framework/execution/lane/latest_lane.h \
-    src/framework/execution/lane/merge_lane.h \
-    src/framework/execution/lane/serial_lane.h \
     src/framework/execution/runtime_executor.h \
     src/framework/execution/runtime_scope.h \
-    src/framework/execution/sync_lane.h \
     src/framework/execution/task_scheduler.h \
     src/framework/platform/gl_types.h \
     src/framework/platform/platform_backend.h \

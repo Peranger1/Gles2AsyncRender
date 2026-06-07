@@ -27,14 +27,14 @@
 >
 > 当前代码与本文若干设计假设已经存在以下差异：
 >
-> - GPU 预览主路径已经不是 “latest-only + 单 pending”
-> - `AsyncLane` 当前主配置为 `MergeWhileBusy + DeliverEveryStartedResult`
-> - waiting 区会先保留多个 checkpoint，再对队尾请求做 merge
+> - GPU 预览主路径已经不是 “latest-only + 单 pending”，也不再通过 `AsyncLane`
+> - 历史 `AsyncLane` / lane 实现已经删除；当前主路径是 `RuntimeExecutor + PhotoEditorRuntimeService + PhotoEditorHandleActor`
+> - latest-only、process-again、generation 防护属于 per-handle actor
 > - Windows 共享纹理槽当前维护多 `Ready` 队列，而不是单 pending 槽
 > - `TextureTicket` 当前额外携带 `outputRevision`，用于隔离 resize 前后的结果
 > - 当前平台发布合同已经是 `submitTexture() + drainPendingPublishes() + pendingPublishState()`
 > - 当前 publish capacity 事件来自平台 reader release，而不是 widget 信号
-> - 当前 `RuntimeHost` 的 Qt 默认实现已经收敛为 `src/framework/execution/qt_runtime_host.*`
+> - 历史 `RuntimeHost` / `QtRuntimeHost` 不再是当前 execution 主路径
 
 ## 1. 背景
 

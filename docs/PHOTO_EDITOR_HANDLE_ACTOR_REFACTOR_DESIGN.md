@@ -24,7 +24,7 @@ photo_editor_render
 
 这条路径可以验证 GPU preview 业务闭环，但无法验证 framework execution 层是否能够稳定承载“任意单个需要 GL 上下文的 `photo_editor_*` 函数调用”。
 
-当前 `AsyncLane` 的抽象也更接近 `process + render` 这种带 SDK 回调的业务特化 lane，而不是通用 GL 线程事件执行器。随着 `photo_editor_*` 函数增加，真正关键的问题不是 framework 如何理解业务流程，而是业务层如何把每个 `photo_editor_*` 函数打包成单个 `void()` 调用，并提交到 GL 线程顺序执行。
+历史 `AsyncLane` 抽象更接近 `process + render` 这种带 SDK 回调的业务特化 lane，而不是通用 GL 线程事件执行器；该实现当前已经删除。随着 `photo_editor_*` 函数增加，真正关键的问题不是 framework 如何理解业务流程，而是业务层如何把每个 `photo_editor_*` 函数打包成单个 `void()` 调用，并提交到 GL 线程顺序执行。
 
 ## 2. 目标
 
@@ -84,7 +84,7 @@ IRuntime + current GL context
 
 ## 5. RuntimeExecutor
 
-`RuntimeExecutor` 是 framework 层的核心新增抽象。它应该比当前 `AsyncLane` 更底层、更通用。
+`RuntimeExecutor` 是 framework 层的核心抽象。它比历史 `AsyncLane` 更底层、更通用。
 
 建议接口：
 
@@ -539,7 +539,7 @@ demo 必须能产生日志证明每个 GL task 只执行一个函数：
 - 新增 `src/framework/execution/runtime_executor.h`
 - 新增 `src/framework/execution/runtime_executor.cpp`
 - 保留 `RuntimeHost`、`QtRuntimeHost`。
-- 暂时保留 `AsyncLane`、`SyncLane`，但 photo editor 主路径不再使用它们。
+- 删除历史 `AsyncLane`、`SyncLane` 实现，photo editor 主路径只使用 `RuntimeExecutor` 和业务 actor。
 
 第二步：新增 photo editor service 与 actor。
 

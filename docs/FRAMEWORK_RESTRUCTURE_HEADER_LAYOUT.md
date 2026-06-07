@@ -13,9 +13,8 @@
 >
 > 状态：Implemented with minor follow-ups
 >
-> 本文档最初用于指导下一轮代码重构。当前 `framework/platform + framework/execution + app + photo_editor` 主结构已经基本落地，因此本文档现在同时承担两种用途：
+> 本文档最初用于指导早期代码重构。当前 `framework/platform + framework/execution + app + photo_editor` 主结构已经继续演进，因此本文档现在只作为迁移关系的历史记录：
 >
-> - 作为当前头文件分层的实现说明
 > - 作为迁移关系的历史记录
 >
 > 当前代码状态请优先参考：
@@ -25,20 +24,20 @@
 >
 > 额外说明：
 >
-> - 本文中若出现 `MergeWhileBusy` 只保留单 waiting、或平台层只保留单 pending 槽的表述，应以当前代码为准
-> - 当前代码的 GPU 预览主路径已经是“多 checkpoint waiting + tail merge + multi-ready texture queue”
+> - 本文中若出现 `AsyncLane`、`SyncLane`、`MergeWhileBusy`、或平台层只保留单 pending 槽的表述，应以当前代码为准
+> - 当前代码的 GPU 预览主路径已经是 `RuntimeExecutor + PhotoEditorRuntimeService + PhotoEditorHandleActor`
 > - 当前 `TextureTicket` 额外携带 `outputRevision`，用于隔离 resize 前后的结果
 > - 当前 `IWriter` 已改为 `submitTexture() + drainPendingPublishes() + pendingPublishState()`，不再是单个 `publishTexture(...) -> bool`
 > - 当前 publish capacity 事件来自平台层 reader release，不再来自 widget 信号桥接
-> - 当前 `RuntimeHost` 的 Qt 默认实现已经命名为 `QtRuntimeHost`，并放在 `src/framework/execution/qt_runtime_host.*`
+> - 历史 `RuntimeHost` / `QtRuntimeHost` / `AsyncLane` / `SyncLane` 实现已经不再是当前代码结构
 
 ## 0. 当前实现状态
 
 截至当前代码版本，以下目标已经完成：
 
 - `framework/platform` 公共合同与 Windows ANGLE D3D11 实现已落地
-- `framework/execution` 已落地，当前主路径为 `RuntimeHost + QtRuntimeHost + AsyncLane<Args, Result, QueuePolicy, DeliveryPolicy, WaitingMerger> + SyncLane`
-- `app/texture_present_widget.*`、`photo_editor_demo_*`、`photo_editor_app_session.*` 已落地
+- `framework/execution` 已落地，当前主路径为 `RuntimeExecutor + async::SingleThreadExecutor`
+- `app/texture_present_widget.*`、`photo_editor_app_session.*`、`photo_editor_runtime_service.*`、`photo_editor_handle_actor.*` 已落地
 - 旧 `framework/core`、`framework/qt`、旧 photo editor processor/session 链路已删除
 - `WinAngleRuntime` 已不再依赖旧 `angle_standalone_runtime.*`
 - `WinAngleTextureWriter` 已直接持有发布逻辑，不再保留 `win_angle_texture_publish_bridge.*`
