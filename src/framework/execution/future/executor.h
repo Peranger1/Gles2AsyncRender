@@ -16,17 +16,43 @@ class Executor
 {
 public:
     virtual ~Executor() = default;
-    virtual void add(std::function<void()> task) = 0;
+    virtual bool add(std::function<void()> task) = 0;
+
+    virtual bool isShutdown() const
+    {
+        return false;
+    }
+
+    virtual int queuedCount() const
+    {
+        return 0;
+    }
+
+    virtual const char *typeName() const
+    {
+        return "Executor";
+    }
 };
 
 class InlineExecutor final : public Executor
 {
 public:
-    void add(std::function<void()> task) override
+    bool add(std::function<void()> task) override
     {
-        if (task) {
-            task();
+        if (!task) {
+            return false;
         }
+
+        try {
+            task();
+        } catch (...) {
+        }
+        return true;
+    }
+
+    const char *typeName() const override
+    {
+        return "InlineExecutor";
     }
 
     static std::shared_ptr<Executor> instance()
@@ -39,24 +65,44 @@ public:
 class ThreadExecutor final : public Executor
 {
 public:
-    void add(std::function<void()> task) override
+    bool add(std::function<void()> task) override
     {
         if (!task) {
-            return;
+            return false;
         }
-        std::thread(std::move(task)).detach();
+
+        try {
+            std::thread([task = std::move(task)]() mutable {
+                try {
+                    task();
+                } catch (...) {
+                }
+            }).detach();
+        } catch (...) {
+            return false;
+        }
+
+        return true;
+    }
+
+    const char *typeName() const override
+    {
+        return "ThreadExecutor";
     }
 };
 
 class ManualExecutor final : public Executor
 {
 public:
-    void add(std::function<void()> task) override
+    bool add(std::function<void()> task) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (task) {
-            m_tasks.push(std::move(task));
+        if (!task) {
+            return false;
         }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_tasks.push(std::move(task));
+        return true;
     }
 
     bool drainOne()
@@ -72,7 +118,10 @@ public:
         }
 
         if (task) {
-            task();
+            try {
+                task();
+            } catch (...) {
+            }
         }
         return true;
     }
@@ -83,7 +132,7 @@ public:
         }
     }
 
-    int queuedCount() const
+    int queuedCount() const override
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         return int(m_tasks.size());
@@ -92,6 +141,11 @@ public:
     bool empty() const
     {
         return queuedCount() == 0;
+    }
+
+    const char *typeName() const override
+    {
+        return "ManualExecutor";
     }
 
 private:
@@ -107,13 +161,13 @@ public:
     {
     }
 
-    void add(std::function<void()> task) override
+    bool add(std::function<void()> task) override
     {
         bool shouldSchedule = false;
         {
             std::lock_guard<std::mutex> lock(m_state->mutex);
             if (m_state->shutdown || !m_state->underlying || !task) {
-                return;
+                return false;
             }
             m_state->tasks.push(std::move(task));
             if (!m_state->running) {
@@ -122,9 +176,17 @@ public:
             }
         }
 
-        if (shouldSchedule) {
-            scheduleDrain(m_state);
+        if (shouldSchedule && !scheduleDrain(m_state)) {
+            std::lock_guard<std::mutex> lock(m_state->mutex);
+            m_state->running = false;
+            m_state->shutdown = true;
+            while (!m_state->tasks.empty()) {
+                m_state->tasks.pop();
+            }
+            return false;
         }
+
+        return true;
     }
 
     void shutdown()
@@ -136,10 +198,21 @@ public:
         }
     }
 
-    bool isShutdown() const
+    bool isShutdown() const override
     {
         std::lock_guard<std::mutex> lock(m_state->mutex);
         return m_state->shutdown;
+    }
+
+    int queuedCount() const override
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        return int(m_state->tasks.size());
+    }
+
+    const char *typeName() const override
+    {
+        return "SerialExecutor";
     }
 
 private:
@@ -157,14 +230,14 @@ private:
         bool shutdown = false;
     };
 
-    static void scheduleDrain(const std::shared_ptr<State> &state)
+    static bool scheduleDrain(const std::shared_ptr<State> &state)
     {
         const std::shared_ptr<Executor> underlying = state->underlying;
         if (!underlying) {
-            return;
+            return false;
         }
 
-        underlying->add([state]() {
+        return underlying->add([state]() {
             drain(state);
         });
     }
@@ -229,16 +302,43 @@ public:
     ThreadPoolExecutor(const ThreadPoolExecutor &) = delete;
     ThreadPoolExecutor &operator=(const ThreadPoolExecutor &) = delete;
 
-    void add(std::function<void()> task) override
+    bool add(std::function<void()> task) override
     {
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_stopping || !task) {
-                return;
-            }
-            m_tasks.push(std::move(task));
+        if (!task) {
+            return false;
         }
-        m_cv.notify_one();
+
+        try {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_stopping) {
+                    return false;
+                }
+                m_tasks.push(std::move(task));
+            }
+            m_cv.notify_one();
+        } catch (...) {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool isShutdown() const override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_stopping;
+    }
+
+    int queuedCount() const override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return int(m_tasks.size());
+    }
+
+    const char *typeName() const override
+    {
+        return "ThreadPoolExecutor";
     }
 
 private:
@@ -261,12 +361,15 @@ private:
             }
 
             if (task) {
-                task();
+                try {
+                    task();
+                } catch (...) {
+                }
             }
         }
     }
 
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     std::condition_variable m_cv;
     std::queue<std::function<void()>> m_tasks;
     std::vector<std::thread> m_workers;
@@ -292,16 +395,26 @@ public:
     SingleThreadExecutor(const SingleThreadExecutor &) = delete;
     SingleThreadExecutor &operator=(const SingleThreadExecutor &) = delete;
 
-    void add(std::function<void()> task) override
+    bool add(std::function<void()> task) override
     {
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_stopping || !task) {
-                return;
-            }
-            m_tasks.push(std::move(task));
+        if (!task) {
+            return false;
         }
-        m_cv.notify_one();
+
+        try {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_stopping) {
+                    return false;
+                }
+                m_tasks.push(std::move(task));
+            }
+            m_cv.notify_one();
+        } catch (...) {
+            return false;
+        }
+
+        return true;
     }
 
     bool isOnExecutorThread() const
@@ -331,10 +444,21 @@ public:
         m_worker.join();
     }
 
-    bool isShutdown() const
+    bool isShutdown() const override
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_stopping;
+    }
+
+    int queuedCount() const override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return int(m_tasks.size());
+    }
+
+    const char *typeName() const override
+    {
+        return "SingleThreadExecutor";
     }
 
     const std::string &name() const
@@ -367,7 +491,10 @@ private:
             }
 
             if (task) {
-                task();
+                try {
+                    task();
+                } catch (...) {
+                }
             }
         }
     }
@@ -383,13 +510,12 @@ private:
 
 namespace detail
 {
-inline void schedule(const std::shared_ptr<Executor> &executor, std::function<void()> task)
+inline bool schedule(const std::shared_ptr<Executor> &executor, std::function<void()> task)
 {
     if (executor) {
-        executor->add(std::move(task));
-    } else {
-        InlineExecutor::instance()->add(std::move(task));
+        return executor->add(std::move(task));
     }
+    return InlineExecutor::instance()->add(std::move(task));
 }
 }
 }

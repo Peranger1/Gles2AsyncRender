@@ -28,7 +28,9 @@ public:
 
     Promise(Promise &&other) noexcept
         : m_state(std::move(other.m_state))
+        , m_abandonOnDestruct(other.m_abandonOnDestruct)
     {
+        other.m_abandonOnDestruct = false;
     }
 
     Promise &operator=(Promise &&other) noexcept
@@ -36,6 +38,8 @@ public:
         if (this != &other) {
             detach();
             m_state = std::move(other.m_state);
+            m_abandonOnDestruct = other.m_abandonOnDestruct;
+            other.m_abandonOnDestruct = false;
         }
         return *this;
     }
@@ -89,18 +93,18 @@ public:
     template <typename F>
     void setWith(F &&func)
     {
-        try {
-            using Result = std::invoke_result_t<F>;
-            if constexpr (std::is_void<Result>::value) {
-                static_assert(std::is_same<T, Unit>::value,
-                              "A void producer can only fulfill Promise<Unit>.");
-                func();
-                setValue();
-            } else {
-                setValue(func());
+        if (!m_state) {
+            throw PromiseInvalid();
+        }
+
+        std::shared_ptr<SharedState<T>> state = m_state;
+        detail::fulfillStateWith<T>(state, std::forward<F>(func));
+
+        using Result = std::invoke_result_t<F>;
+        if constexpr (detail::IsFuture<Result>::value) {
+            if (!state->isReady()) {
+                m_abandonOnDestruct = true;
             }
-        } catch (...) {
-            setException(std::current_exception());
         }
     }
 
@@ -117,14 +121,16 @@ private:
         }
 
         try {
-            if (!m_state->isReady()) {
+            if (!m_abandonOnDestruct && !m_state->isReady()) {
                 m_state->setResult(Try<T>::fromException(std::make_exception_ptr(BrokenPromise())));
             }
         } catch (...) {
         }
         m_state.reset();
+        m_abandonOnDestruct = false;
     }
 
     std::shared_ptr<SharedState<T>> m_state;
+    bool m_abandonOnDestruct = false;
 };
 }

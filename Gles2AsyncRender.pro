@@ -46,6 +46,7 @@ HEADERS += \
     src/framework/execution/future/future_splitter.h \
     src/framework/execution/future/promise.h \
     src/framework/execution/future/shared_state.h \
+    src/framework/execution/future/timer_executor.h \
     src/framework/execution/future/timeout.h \
     src/framework/execution/future/try.h \
     src/framework/execution/future/unit.h \

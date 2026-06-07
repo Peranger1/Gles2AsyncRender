@@ -81,4 +81,13 @@ public:
     {
     }
 };
+
+class ExecutorRejected : public FutureException
+{
+public:
+    ExecutorRejected()
+        : FutureException("Executor rejected task")
+    {
+    }
+};
 }

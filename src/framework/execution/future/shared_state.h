@@ -5,6 +5,7 @@
 #include "try.h"
 
 #include <condition_variable>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@ class SharedState final
 {
 public:
     using Callback = std::function<void(Try<T> &&)>;
+    using ScheduleFailure = std::function<void()>;
     using InterruptHandler = std::function<void(std::exception_ptr)>;
 
     void markFutureRetrieved()
@@ -92,6 +94,7 @@ public:
     void setResult(Try<T> result)
     {
         Callback callback;
+        ScheduleFailure scheduleFailure;
         std::shared_ptr<Executor> executor;
         std::shared_ptr<Try<T>> resultForCallback;
 
@@ -107,6 +110,7 @@ public:
 
             if (m_callback) {
                 callback = std::move(m_callback);
+                scheduleFailure = std::move(m_scheduleFailure);
                 executor = m_executor;
                 resultForCallback = std::make_shared<Try<T>>(std::move(*m_result));
                 m_result.reset();
@@ -114,13 +118,16 @@ public:
         }
 
         if (callback) {
-            detail::schedule(executor, [callback = std::move(callback), resultForCallback]() mutable {
+            const bool scheduled = detail::schedule(executor, [callback = std::move(callback), resultForCallback]() mutable {
                 callback(std::move(*resultForCallback));
             });
+            if (!scheduled) {
+                invokeScheduleFailure(scheduleFailure);
+            }
         }
     }
 
-    void setCallback(Callback callback)
+    void setCallback(Callback callback, ScheduleFailure scheduleFailure = {})
     {
         std::shared_ptr<Executor> executor;
         std::shared_ptr<Try<T>> readyResult;
@@ -137,22 +144,54 @@ public:
                 m_result.reset();
             } else {
                 m_callback = std::move(callback);
+                m_scheduleFailure = std::move(scheduleFailure);
                 return;
             }
         }
 
-        detail::schedule(executor, [callback = std::move(callback), readyResult]() mutable {
+        const bool scheduled = detail::schedule(executor, [callback = std::move(callback), readyResult]() mutable {
             callback(std::move(*readyResult));
         });
+        if (!scheduled) {
+            invokeScheduleFailure(scheduleFailure);
+        }
     }
 
-    Try<T> waitAndTake()
+    void wait()
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_cv.wait(lock, [this]() {
             return m_ready;
         });
+    }
 
+    template <typename Rep, typename Period>
+    bool waitFor(std::chrono::duration<Rep, Period> timeout)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_cv.wait_for(lock, timeout, [this]() {
+            return m_ready;
+        });
+    }
+
+    template <typename Clock, typename Duration>
+    bool waitUntil(std::chrono::time_point<Clock, Duration> deadline)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_cv.wait_until(lock, deadline, [this]() {
+            return m_ready;
+        });
+    }
+
+    Try<T> waitAndTake()
+    {
+        wait();
+        return takeResult();
+    }
+
+    Try<T> takeResult()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_result.has_value()) {
             throw FutureInvalid();
         }
@@ -173,12 +212,23 @@ private:
         }
     }
 
+    static void invokeScheduleFailure(const ScheduleFailure &handler) noexcept
+    {
+        try {
+            if (handler) {
+                handler();
+            }
+        } catch (...) {
+        }
+    }
+
     mutable std::mutex m_mutex;
     std::condition_variable m_cv;
     bool m_ready = false;
     bool m_futureRetrieved = false;
     std::optional<Try<T>> m_result;
     Callback m_callback;
+    ScheduleFailure m_scheduleFailure;
     std::shared_ptr<Executor> m_executor;
     InterruptHandler m_interruptHandler;
     std::exception_ptr m_interrupt;

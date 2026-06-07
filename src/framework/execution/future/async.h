@@ -22,11 +22,14 @@ auto async(std::shared_ptr<Executor> executor, F &&func)
     auto promiseHolder = std::make_shared<Promise<Result>>(std::move(promise));
     auto funcHolder = std::make_shared<typename std::decay<F>::type>(std::forward<F>(func));
 
-    detail::schedule(executor, [promiseHolder, funcHolder]() mutable {
+    const bool scheduled = detail::schedule(executor, [promiseHolder, funcHolder]() mutable {
         promiseHolder->setWith([&]() -> RawResult {
             return (*funcHolder)();
         });
     });
+    if (!scheduled) {
+        promiseHolder->setException(std::make_exception_ptr(ExecutorRejected()));
+    }
 
     return future;
 }

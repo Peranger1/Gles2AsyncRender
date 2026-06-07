@@ -44,6 +44,7 @@ add_executable(Gles2AsyncRender
     src/framework/execution/future/future_splitter.h
     src/framework/execution/future/promise.h
     src/framework/execution/future/shared_state.h
+    src/framework/execution/future/timer_executor.h
     src/framework/execution/future/timeout.h
     src/framework/execution/future/try.h
     src/framework/execution/future/unit.h
@@ -128,7 +129,13 @@ endif()
 
 if (BUILD_TESTING)
     add_executable(async_future_tests
+        src/framework/execution/future/test/future_combinator_tests.cpp
+        src/framework/execution/future/test/future_continuation_tests.cpp
+        src/framework/execution/future/test/future_executor_tests.cpp
+        src/framework/execution/future/test/future_lifecycle_tests.cpp
+        src/framework/execution/future/test/future_splitter_tests.cpp
         src/framework/execution/future/test/future_tests.cpp
+        src/framework/execution/future/test/future_timeout_tests.cpp
     )
 
     target_include_directories(async_future_tests PRIVATE
