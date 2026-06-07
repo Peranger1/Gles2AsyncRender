@@ -6,7 +6,11 @@
 #include <QSize>
 
 class IRuntime;
-class RuntimeHost;
+
+namespace execution
+{
+class RuntimeExecutor;
+}
 
 class IWriterEvents
 {
@@ -22,7 +26,7 @@ class IWriter
 public:
     virtual ~IWriter() = default;
 
-    virtual void attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events) = 0;
+    virtual void attach(execution::RuntimeExecutor *executor, IWriterEvents *events) = 0;
     virtual bool submitTexture(GLuint sourceTextureId,
                                const QSize &size,
                                quint64 outputRevision,

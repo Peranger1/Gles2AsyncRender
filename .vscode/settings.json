@@ -1,0 +1,37 @@
+{
+    // CMake 配置参数
+    "cmake.configureArgs": [
+        "-DQFK_BUILD_SHARED_LIBS=ON",
+        "-DQFK_ENABLE_TESTS=ON",
+        "-DQFK_ENABLE_EXAMPLES=ON",
+        "-DCMAKE_PREFIX_PATH=D:/CodePrograms/Qt/5.15.2/msvc2019_64"
+    ],
+
+    // 使用 Ninja 生成器
+    "cmake.generator": "Ninja",
+
+    // 构建目录格式：build-{kit}-{buildType}
+    "cmake.buildDirectory": "${workspaceFolder}/build-${buildKit}-${buildType}",
+
+    // 使用自定义 CMake Kits (自动从 .vscode/cmake-kits.json 加载)
+    // "cmake.useCMakePresets": "never",
+    // 强制使用 cmake 预设
+    "cmake.useCMakePresets": "always",
+
+    // 自动配置项目
+    "cmake.configureOnOpen": false,
+
+    // 导出 compile_commands.json 用于代码分析
+    "cmake.configureSettings": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+    },
+
+    // clangd 配置(.clangd 文件提供了更多选项)
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build/win-local-clang-debug",
+        "--background-index",
+        "--clang-tidy",
+        "--completion-style=detailed",
+        "--header-insertion=never"
+    ]
+}

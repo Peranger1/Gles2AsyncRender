@@ -5,9 +5,6 @@
 #include <memory>
 
 class MacIoSurfaceTextureSlots;
-class RuntimeHost;
-class IRuntime;
-class IWriterEvents;
 
 class MacCocoaGlTextureWriter final : public IWriter
 {
@@ -15,7 +12,7 @@ public:
     explicit MacCocoaGlTextureWriter(const std::shared_ptr<MacIoSurfaceTextureSlots> &slotPool);
     ~MacCocoaGlTextureWriter() override;
 
-    void attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events) override;
+    void attach(execution::RuntimeExecutor *executor, IWriterEvents *events) override;
     bool submitTexture(GLuint sourceTextureId,
                        const QSize &size,
                        quint64 outputRevision,

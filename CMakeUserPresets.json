@@ -1,0 +1,53 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "local-env",
+      "displayName": "Local Environment Paths",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "D:/CodePrograms/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin/clang-cl.exe",
+        "CMAKE_CXX_COMPILER": "D:/CodePrograms/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin/clang-cl.exe",
+        "CMAKE_PREFIX_PATH": "D:/CodePrograms/Qt/5.15.1/msvc2019_64"
+      }
+    },
+    {
+      "name": "win-local-clang-debug",
+      "displayName": "Local Windows Clang-cl Debug",
+      "inherits": [
+        "win-clang-debug",
+        "local-env"
+      ],
+      "cacheVariables": {
+        "CMAKE_POLICY_DEFAULT_CMP0141": "NEW"
+      }
+    },
+    {
+      "name": "win-local-clang-release",
+      "displayName": "Local Windows Clang-cl Release",
+      "inherits": [
+        "win-clang-release",
+        "local-env"
+      ]
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "win-clang-debug",
+      "configurePreset": "win-local-clang-debug"
+    },
+    {
+      "name": "win-clang-release",
+      "configurePreset": "win-local-clang-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "win-clang-debug",
+      "configurePreset": "win-local-clang-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

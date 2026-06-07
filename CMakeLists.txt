@@ -53,12 +53,8 @@ add_executable(Gles2AsyncRender
     src/framework/execution/lane/latest_lane.h
     src/framework/execution/lane/merge_lane.h
     src/framework/execution/lane/serial_lane.h
-    src/framework/execution/qt_runtime_host.cpp
-    src/framework/execution/qt_runtime_host.h
     src/framework/execution/runtime_executor.cpp
     src/framework/execution/runtime_executor.h
-    src/framework/execution/runtime_execution.h
-    src/framework/execution/runtime_host.h
     src/framework/execution/runtime_scope.cpp
     src/framework/execution/runtime_scope.h
     src/framework/execution/sync_lane.h

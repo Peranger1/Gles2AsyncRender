@@ -2,8 +2,7 @@
 
 #include "app/photo_editor_handle_actor.h"
 #include "app/photo_editor_runtime_service.h"
-#include "framework/execution/execution_common.h"
-#include "framework/execution/qt_runtime_host.h"
+#include "framework/execution/runtime_executor.h"
 #include "framework/platform/platform_backend.h"
 #include "framework/platform/presentation_events.h"
 #include "framework/platform/writer.h"
@@ -13,6 +12,9 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QPainter>
+
+#include <exception>
+#include <optional>
 
 namespace
 {
@@ -78,16 +80,18 @@ void applyColorAdjustments(QImage *image, float brightness, float contrast)
     *image = std::move(argb);
 }
 
-ExecutionOutcome<CpuImageResult> renderCpuPreview(const std::shared_ptr<const QImage> &sourceImage,
-                                                  const QString &sourceKey,
-                                                  quint64 sourceImageCacheKey,
-                                                  const ImageEffectParameters &parameters,
-                                                  const QSize &previewSize)
+std::optional<CpuImageResult> renderCpuPreview(const std::shared_ptr<const QImage> &sourceImage,
+                                               const QString &sourceKey,
+                                               quint64 sourceImageCacheKey,
+                                               const ImageEffectParameters &parameters,
+                                               const QSize &previewSize,
+                                               QString *error)
 {
     if (!sourceImage || sourceImage->isNull()) {
-        ExecutionError error;
-        error.message = QStringLiteral("CPU preview requires a valid source image.");
-        return ExecutionOutcome<CpuImageResult>::failure(std::move(error));
+        if (error) {
+            *error = QStringLiteral("CPU preview requires a valid source image.");
+        }
+        return std::nullopt;
     }
 
     const QSize targetSize = sanitizedPreviewSize(previewSize, sourceImage->size());
@@ -127,7 +131,7 @@ ExecutionOutcome<CpuImageResult> renderCpuPreview(const std::shared_ptr<const QI
                                       .arg(parameters.contrast, 0, 'f', 2)
                                       .arg(parameters.zoom, 0, 'f', 2)
                                       .arg(parameters.rotationDegrees, 0, 'f', 1));
-    return ExecutionOutcome<CpuImageResult>::success(std::move(previewResult));
+    return previewResult;
 }
 
 QString gpuActorKey(const QString &sourceKey, quint64 sourceImageCacheKey)
@@ -232,24 +236,25 @@ bool PhotoEditorAppSession::initialize(IPlatformBackend *backend, QSize outputSi
         return false;
     }
 
-    std::unique_ptr<IRuntime> runtime = backend->createRuntime();
-    auto runtimeHost = std::make_unique<QtRuntimeHost>(std::move(runtime));
-    QString error;
-    if (!runtimeHost->start(&error)) {
-        emit initializationFailed(error.isEmpty()
-                                      ? QStringLiteral("Failed to initialize the platform runtime.")
-                                      : error);
+    auto runtimeExecutor = std::make_unique<execution::RuntimeExecutor>(backend->createRuntime());
+    try {
+        runtimeExecutor->initialize().get();
+    } catch (const std::exception &ex) {
+        emit initializationFailed(QString::fromStdString(ex.what()));
+        return false;
+    } catch (...) {
+        emit initializationFailed(QStringLiteral("Failed to initialize the platform runtime."));
         return false;
     }
 
-    auto runtimeService = std::make_unique<PhotoEditorRuntimeService>(runtimeHost.get(), this);
+    auto runtimeService = std::make_unique<PhotoEditorRuntimeService>(runtimeExecutor.get(), this);
     connect(runtimeService.get(), &PhotoEditorRuntimeService::warning, this, &PhotoEditorAppSession::requestWarning);
 
     m_backend = backend;
-    m_runtimeHost = std::move(runtimeHost);
+    m_runtimeExecutor = std::move(runtimeExecutor);
     m_runtimeService = std::move(runtimeService);
     if (m_backend && m_backend->writer() && m_backend->presentationEvents()) {
-        m_backend->writer()->attach(m_runtimeHost.get(), m_runtimeHost->runtime(), m_backend->presentationEvents());
+        m_backend->writer()->attach(m_runtimeExecutor.get(), m_backend->presentationEvents());
     }
     m_outputSize = sanitizedSize(outputSize);
     m_outputRevision = 0;
@@ -388,12 +393,15 @@ void PhotoEditorAppSession::shutdown()
     if (m_backend && m_backend->writer()) {
         m_backend->writer()->reset();
     }
-    if (m_runtimeHost) {
-        m_runtimeHost->shutdown();
+    if (m_runtimeExecutor) {
+        try {
+            m_runtimeExecutor->shutdown().get();
+        } catch (...) {
+        }
     }
 
     m_runtimeService.reset();
-    m_runtimeHost.reset();
+    m_runtimeExecutor.reset();
     m_backend = nullptr;
     m_catalog = std::make_unique<ImageCatalogState>();
 }
@@ -430,19 +438,20 @@ void PhotoEditorAppSession::runCpuPreviewSync()
     const quint64 sourceImageCacheKey = sourceImage ? sourceImage->cacheKey() : 0;
     const QSize previewSize = m_outputSize.boundedTo(QSize(320, 320));
 
-    const ExecutionOutcome<CpuImageResult> outcome = renderCpuPreview(sourceImage,
-                                                                      sourceKey,
-                                                                      sourceImageCacheKey,
-                                                                      m_effectParameters,
-                                                                      previewSize);
-    if (!outcome.ok()) {
-        emit requestWarning(outcome.error().message);
+    QString error;
+    std::optional<CpuImageResult> previewResult = renderCpuPreview(sourceImage,
+                                                                   sourceKey,
+                                                                   sourceImageCacheKey,
+                                                                   m_effectParameters,
+                                                                   previewSize,
+                                                                   &error);
+    if (!previewResult.has_value()) {
+        emit requestWarning(error);
         return;
     }
 
-    const CpuImageResult &previewResult = outcome.value();
-    const QString description = previewResult.metadata.value(QStringLiteral("description")).toString();
-    emit cpuPreviewReady(previewResult.image, description);
+    const QString description = previewResult->metadata.value(QStringLiteral("description")).toString();
+    emit cpuPreviewReady(previewResult->image, description);
 }
 
 QString PhotoEditorAppSession::currentGpuActorKey() const
@@ -486,7 +495,7 @@ std::shared_ptr<PhotoEditorHandleActor> PhotoEditorAppSession::currentGpuActor()
 
 void PhotoEditorAppSession::handleGpuRenderResult(const RawGpuTextureResult &gpuResult)
 {
-    if (m_shuttingDown || m_backend == nullptr || m_runtimeHost == nullptr) {
+    if (m_shuttingDown || m_backend == nullptr || m_runtimeExecutor == nullptr) {
         return;
     }
 

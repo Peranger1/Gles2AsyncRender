@@ -9,15 +9,18 @@
 #include <memory>
 
 class PhotoEditorHandleActor;
+
+namespace execution
+{
 class RuntimeExecutor;
-class RuntimeHost;
+}
 
 class PhotoEditorRuntimeService final : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit PhotoEditorRuntimeService(RuntimeHost *host, QObject *parent = nullptr);
+    explicit PhotoEditorRuntimeService(execution::RuntimeExecutor *executor, QObject *parent = nullptr);
     ~PhotoEditorRuntimeService() override;
 
     void initialize();
@@ -32,7 +35,7 @@ signals:
 private:
     void emitWarning(const QString &message);
 
-    std::unique_ptr<RuntimeExecutor> m_executor;
+    execution::RuntimeExecutor *m_executor = nullptr;
     mutable QMutex m_mutex;
     QHash<quint64, std::shared_ptr<PhotoEditorHandleActor>> m_actors;
     quint64 m_nextActorId = 0;

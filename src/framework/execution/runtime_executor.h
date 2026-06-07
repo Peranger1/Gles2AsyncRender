@@ -81,6 +81,36 @@ public:
             });
     }
 
+    template <typename F>
+    auto submitBlocking(F &&func)
+        -> typename async::detail::FutureValue<std::invoke_result_t<F, IRuntime &>>::Type
+    {
+        using RawResult = std::invoke_result_t<F, IRuntime &>;
+        using Result = typename async::detail::FutureValue<RawResult>::Type;
+
+        const auto state = m_state;
+        if (!state || state->shutdown.load()) {
+            throw ExecutorShutdown();
+        }
+        if (!state->runtime || !state->executor || state->executor->isShutdown()) {
+            throw RuntimeUnavailable();
+        }
+
+        if (state->executor->isOnExecutorThread()) {
+            if (state->shutdown.load() || !state->runtime) {
+                throw ExecutorShutdown();
+            }
+            if constexpr (std::is_void<RawResult>::value) {
+                std::forward<F>(func)(*state->runtime);
+                return async::Unit();
+            } else {
+                return std::forward<F>(func)(*state->runtime);
+            }
+        }
+
+        return submit(std::forward<F>(func)).get();
+    }
+
     async::Future<async::Unit> shutdown();
     bool isShutdown() const;
     bool isOnRuntimeThread() const;

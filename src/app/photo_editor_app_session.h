@@ -14,7 +14,11 @@
 class IPlatformBackend;
 class PhotoEditorHandleActor;
 class PhotoEditorRuntimeService;
-class QtRuntimeHost;
+
+namespace execution
+{
+class RuntimeExecutor;
+}
 
 class PhotoEditorAppSession final : public QObject
 {
@@ -59,7 +63,7 @@ private:
 
     std::unique_ptr<ImageCatalogState> m_catalog;
     IPlatformBackend *m_backend = nullptr;
-    std::unique_ptr<QtRuntimeHost> m_runtimeHost;
+    std::unique_ptr<execution::RuntimeExecutor> m_runtimeExecutor;
     std::unique_ptr<PhotoEditorRuntimeService> m_runtimeService;
     QHash<QString, std::shared_ptr<PhotoEditorHandleActor>> m_gpuActors;
     std::shared_ptr<PhotoEditorHandleActor> m_currentGpuActor;

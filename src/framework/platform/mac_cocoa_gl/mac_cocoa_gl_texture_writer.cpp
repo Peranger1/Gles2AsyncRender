@@ -1,6 +1,6 @@
 #include "mac_cocoa_gl_texture_writer.h"
 
-#include "framework/execution/runtime_host.h"
+#include "framework/execution/runtime_executor.h"
 #include "framework/platform/gl_types.h"
 #include "framework/platform/runtime.h"
 
@@ -12,6 +12,7 @@
 #include <QVector>
 
 #include <atomic>
+#include <exception>
 
 #if defined(Q_OS_MACOS)
 #include <CoreFoundation/CoreFoundation.h>
@@ -41,6 +42,22 @@ struct DrainPendingPublishesResult final
     QVector<TextureTicket> tickets;
     QString error;
 };
+
+QString exceptionMessage(std::exception_ptr exception, const QString &fallback)
+{
+    if (!exception) {
+        return fallback;
+    }
+
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception &ex) {
+        const QString message = QString::fromStdString(ex.what());
+        return message.isEmpty() ? fallback : message;
+    } catch (...) {
+        return fallback;
+    }
+}
 
 struct PendingLatestFrame final
 {
@@ -150,7 +167,7 @@ public:
     }
 
     std::shared_ptr<MacIoSurfaceTextureSlots> slotPool;
-    std::atomic<RuntimeHost *> host { nullptr };
+    std::atomic<execution::RuntimeExecutor *> executor { nullptr };
     std::atomic<IRuntime *> attachedRuntime { nullptr };
     std::atomic<IWriterEvents *> eventSink { nullptr };
     std::atomic_bool drainScheduled { false };
@@ -181,9 +198,9 @@ public:
         releaseSurfaceRefs();
     }
 
-    RuntimeHost *runtimeHost() const noexcept
+    execution::RuntimeExecutor *runtimeExecutor() const noexcept
     {
-        return host.load(std::memory_order_acquire);
+        return executor.load(std::memory_order_acquire);
     }
 
     IRuntime *runtime() const noexcept
@@ -722,14 +739,14 @@ MacCocoaGlTextureWriter::~MacCocoaGlTextureWriter()
     reset();
 }
 
-void MacCocoaGlTextureWriter::attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events)
+void MacCocoaGlTextureWriter::attach(execution::RuntimeExecutor *executor, IWriterEvents *events)
 {
     if (!m_impl) {
         return;
     }
 
-    m_impl->host.store(host, std::memory_order_release);
-    m_impl->attachedRuntime.store(runtime, std::memory_order_release);
+    m_impl->executor.store(executor, std::memory_order_release);
+    m_impl->attachedRuntime.store(nullptr, std::memory_order_release);
     m_impl->eventSink.store(events, std::memory_order_release);
     m_impl->drainScheduled.store(false, std::memory_order_release);
 }
@@ -739,40 +756,40 @@ bool MacCocoaGlTextureWriter::submitTexture(GLuint sourceTextureId,
                                             quint64 outputRevision,
                                             QString *error)
 {
-    RuntimeHost *host = m_impl ? m_impl->runtimeHost() : nullptr;
-    IRuntime *runtime = m_impl ? m_impl->runtime() : nullptr;
+    execution::RuntimeExecutor *executor = m_impl ? m_impl->runtimeExecutor() : nullptr;
     IWriterEvents *events = m_impl ? m_impl->events() : nullptr;
-    if (!m_impl || !host || !runtime || !events || !m_impl->slotPool) {
+    if (!m_impl || !executor || !events || !m_impl->slotPool) {
         if (error) {
-            *error = QStringLiteral("MacCocoaGlTextureWriter requires a valid runtime host, runtime, event sink, and slot pool.");
+            *error = QStringLiteral("MacCocoaGlTextureWriter requires a valid runtime executor, event sink, and slot pool.");
         }
         return false;
     }
 
     SubmitTextureResult result;
-    QString dispatchError;
-    const bool dispatched = host->dispatchSync([this, sourceTextureId, size, outputRevision, &result](IRuntime *invokedRuntime) {
-        if (!m_impl || invokedRuntime == nullptr || invokedRuntime != m_impl->runtime()) {
-            result.kind = SubmitTextureResultKind::Failed;
-            result.error = QStringLiteral("MacCocoaGlTextureWriter runtime dispatch reached an unexpected runtime.");
-            return;
-        }
+    try {
+        result = executor->submitBlocking([this, sourceTextureId, size, outputRevision](IRuntime &runtime) {
+            SubmitTextureResult taskResult;
+            if (!m_impl) {
+                taskResult.error = QStringLiteral("MacCocoaGlTextureWriter was reset before texture submission.");
+                return taskResult;
+            }
 
-        QString enterError;
-        if (!invokedRuntime->enter(&enterError)) {
-            result.kind = SubmitTextureResultKind::Failed;
-            result.error = std::move(enterError);
-            return;
-        }
+            m_impl->attachedRuntime.store(&runtime, std::memory_order_release);
 
-        result = m_impl->submitTexture(sourceTextureId, size, outputRevision);
-        invokedRuntime->leave();
-    }, &dispatchError);
-    if (!dispatched) {
+            QString enterError;
+            if (!runtime.enter(&enterError)) {
+                taskResult.error = std::move(enterError);
+                return taskResult;
+            }
+
+            taskResult = m_impl->submitTexture(sourceTextureId, size, outputRevision);
+            runtime.leave();
+            return taskResult;
+        });
+    } catch (...) {
         if (error) {
-            *error = dispatchError.isEmpty()
-                ? QStringLiteral("MacCocoaGlTextureWriter failed to dispatch to the runtime host.")
-                : dispatchError;
+            *error = exceptionMessage(std::current_exception(),
+                                      QStringLiteral("MacCocoaGlTextureWriter failed to submit texture on the runtime executor."));
         }
         return false;
     }
@@ -801,26 +818,27 @@ void MacCocoaGlTextureWriter::notifyPresentationCapacityAvailable()
         return;
     }
 
-    RuntimeHost *host = m_impl->runtimeHost();
-    if (host == nullptr) {
+    execution::RuntimeExecutor *executor = m_impl->runtimeExecutor();
+    if (executor == nullptr) {
         m_impl->drainScheduled.store(false, std::memory_order_release);
         return;
     }
 
-    QString dispatchError;
-    const bool dispatched = host->dispatchAsync([this](IRuntime *runtime) {
+    auto future = executor->submit([this](IRuntime &runtime) {
         if (!m_impl) {
             return;
         }
 
         m_impl->drainScheduled.store(false, std::memory_order_release);
-        if (!m_impl->hasPendingFrame() || runtime == nullptr || runtime != m_impl->runtime()) {
+        if (!m_impl->hasPendingFrame()) {
             return;
         }
 
+        m_impl->attachedRuntime.store(&runtime, std::memory_order_release);
+
         IWriterEvents *events = m_impl->events();
         QString enterError;
-        if (!runtime->enter(&enterError)) {
+        if (!runtime.enter(&enterError)) {
             if (events != nullptr && !enterError.isEmpty()) {
                 events->onWarning(enterError);
             }
@@ -828,7 +846,7 @@ void MacCocoaGlTextureWriter::notifyPresentationCapacityAvailable()
         }
 
         const DrainPendingPublishesResult result = m_impl->drainPendingPublishes();
-        runtime->leave();
+        runtime.leave();
 
         if (events == nullptr) {
             return;
@@ -840,15 +858,21 @@ void MacCocoaGlTextureWriter::notifyPresentationCapacityAvailable()
         for (const TextureTicket &ticket : result.tickets) {
             events->onTextureReady(ticket);
         }
-    }, &dispatchError);
+    });
 
-    if (!dispatched) {
+    std::move(future).thenTry([this](async::Try<async::Unit> &&result) {
+        if (!result.hasException() || !m_impl) {
+            return async::Unit();
+        }
+
         m_impl->drainScheduled.store(false, std::memory_order_release);
         IWriterEvents *events = m_impl->events();
-        if (events != nullptr && !dispatchError.isEmpty()) {
-            events->onWarning(dispatchError);
+        if (events != nullptr) {
+            events->onWarning(exceptionMessage(result.exception(),
+                                               QStringLiteral("MacCocoaGlTextureWriter failed to drain pending publishes.")));
         }
-    }
+        return async::Unit();
+    });
 }
 
 void MacCocoaGlTextureWriter::reset()
@@ -857,36 +881,40 @@ void MacCocoaGlTextureWriter::reset()
         return;
     }
 
-    RuntimeHost *host = m_impl->runtimeHost();
-    IRuntime *runtime = m_impl->runtime();
-    if (m_impl->hasGlResources()) {
-        QString dispatchError;
-        if (host != nullptr && runtime != nullptr) {
-            const bool dispatched = host->dispatchSync([this](IRuntime *invokedRuntime) {
-                if (!m_impl || invokedRuntime == nullptr || invokedRuntime != m_impl->runtime()) {
-                    return;
-                }
+    execution::RuntimeExecutor *executor = m_impl->runtimeExecutor();
+    m_impl->executor.store(nullptr, std::memory_order_release);
+    m_impl->eventSink.store(nullptr, std::memory_order_release);
+    m_impl->drainScheduled.store(false, std::memory_order_release);
 
-                QString enterError;
-                if (!invokedRuntime->enter(&enterError)) {
-                    return;
-                }
-                m_impl->shutdown();
-                invokedRuntime->leave();
-            }, &dispatchError);
-            if (!dispatched) {
-                m_impl->shutdown();
+    if (m_impl->hasGlResources()) {
+        bool releasedOnRuntime = false;
+        if (executor != nullptr && !executor->isShutdown()) {
+            try {
+                executor->submitBlocking([this, &releasedOnRuntime](IRuntime &runtime) {
+                    if (!m_impl) {
+                        return;
+                    }
+
+                    m_impl->attachedRuntime.store(&runtime, std::memory_order_release);
+
+                    QString enterError;
+                    if (runtime.enter(&enterError)) {
+                        m_impl->shutdown();
+                        runtime.leave();
+                        releasedOnRuntime = true;
+                    }
+                });
+            } catch (...) {
             }
-        } else {
+        }
+
+        if (!releasedOnRuntime) {
             m_impl->shutdown();
         }
     } else {
         m_impl->shutdown();
     }
 
-    m_impl->host.store(nullptr, std::memory_order_release);
-    m_impl->eventSink.store(nullptr, std::memory_order_release);
-    m_impl->drainScheduled.store(false, std::memory_order_release);
     m_impl->attachedRuntime.store(nullptr, std::memory_order_release);
     if (m_impl->slotPool) {
         m_impl->slotPool->reset();

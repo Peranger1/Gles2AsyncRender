@@ -19,7 +19,6 @@ SOURCES += \
     src/framework/backend/win_angle_d3d11/gles2_proc_table.cpp \
     src/framework/backend/win_angle_d3d11/gles2_shader_utils.cpp \
     src/framework/backend/win_angle_d3d11/qt_angle_egl_tools.cpp \
-    src/framework/execution/qt_runtime_host.cpp \
     src/framework/execution/runtime_executor.cpp \
     src/framework/execution/runtime_scope.cpp \
     src/photo_editor/photo_editor_gles2_backend.cpp \
@@ -56,10 +55,7 @@ HEADERS += \
     src/framework/execution/lane/latest_lane.h \
     src/framework/execution/lane/merge_lane.h \
     src/framework/execution/lane/serial_lane.h \
-    src/framework/execution/qt_runtime_host.h \
     src/framework/execution/runtime_executor.h \
-    src/framework/execution/runtime_execution.h \
-    src/framework/execution/runtime_host.h \
     src/framework/execution/runtime_scope.h \
     src/framework/execution/sync_lane.h \
     src/framework/execution/task_scheduler.h \

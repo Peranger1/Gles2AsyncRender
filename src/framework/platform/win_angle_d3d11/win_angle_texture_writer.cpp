@@ -3,7 +3,7 @@
 #include "d3d11_shared_texture_slots.h"
 #include "framework/backend/win_angle_d3d11/gles2_proc_table.h"
 #include "framework/backend/win_angle_d3d11/gles2_shader_utils.h"
-#include "framework/execution/runtime_host.h"
+#include "framework/execution/runtime_executor.h"
 #include "runtime_diagnostics.h"
 #include "win_angle_runtime.h"
 
@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <d3d11.h>
+#include <exception>
 #include <dxgi.h>
 #include <wrl/client.h>
 
@@ -81,6 +82,22 @@ bool isAcquireTimeout(HRESULT hr)
 QSize sanitizedSize(const QSize &size)
 {
     return QSize(qMax(1, size.width()), qMax(1, size.height()));
+}
+
+QString exceptionMessage(std::exception_ptr exception, const QString &fallback)
+{
+    if (!exception) {
+        return fallback;
+    }
+
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception &ex) {
+        const QString message = QString::fromStdString(ex.what());
+        return message.isEmpty() ? fallback : message;
+    } catch (...) {
+        return fallback;
+    }
 }
 
 UINT rowPitchForWidth(int width)
@@ -167,7 +184,7 @@ struct WinAngleTextureWriter::Impl final
     }
 
     std::shared_ptr<D3D11SharedTextureSlots> slotPool;
-    std::atomic<RuntimeHost *> host { nullptr };
+    std::atomic<execution::RuntimeExecutor *> executor { nullptr };
     std::atomic<IRuntime *> attachedRuntime { nullptr };
     std::atomic<IWriterEvents *> eventSink { nullptr };
     std::atomic_bool drainScheduled { false };
@@ -213,9 +230,9 @@ struct WinAngleTextureWriter::Impl final
         return pendingLatestFrame.valid;
     }
 
-    RuntimeHost *runtimeHost() const noexcept
+    execution::RuntimeExecutor *runtimeExecutor() const noexcept
     {
-        return host.load(std::memory_order_acquire);
+        return executor.load(std::memory_order_acquire);
     }
 
     WinAngleRuntime *runtime() const noexcept
@@ -1166,14 +1183,14 @@ WinAngleTextureWriter::~WinAngleTextureWriter()
     reset();
 }
 
-void WinAngleTextureWriter::attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events)
+void WinAngleTextureWriter::attach(execution::RuntimeExecutor *executor, IWriterEvents *events)
 {
     if (!m_impl) {
         return;
     }
 
-    m_impl->host.store(host, std::memory_order_release);
-    m_impl->attachedRuntime.store(runtime, std::memory_order_release);
+    m_impl->executor.store(executor, std::memory_order_release);
+    m_impl->attachedRuntime.store(nullptr, std::memory_order_release);
     m_impl->eventSink.store(events, std::memory_order_release);
     m_impl->drainScheduled.store(false, std::memory_order_release);
 }
@@ -1183,27 +1200,49 @@ bool WinAngleTextureWriter::submitTexture(GLuint sourceTextureId,
                                           quint64 outputRevision,
                                           QString *error)
 {
-    WinAngleRuntime *activeRuntime = m_impl ? m_impl->runtime() : nullptr;
-    RuntimeHost *host = m_impl ? m_impl->runtimeHost() : nullptr;
+    execution::RuntimeExecutor *executor = m_impl ? m_impl->runtimeExecutor() : nullptr;
     IWriterEvents *events = m_impl ? m_impl->events() : nullptr;
-    if (!m_impl || !activeRuntime || !host || !events || !m_impl->slotPool) {
+    if (!m_impl || !executor || !events || !m_impl->slotPool) {
         if (error) {
-            *error = QStringLiteral("WinAngleTextureWriter requires a valid runtime host, runtime, event sink, and slot pool.");
+            *error = QStringLiteral("WinAngleTextureWriter requires a valid runtime executor, event sink, and slot pool.");
         }
         return false;
     }
 
-    QString enterError;
-    if (!activeRuntime->enter(&enterError)) {
+    SubmitTextureResult result;
+    try {
+        result = executor->submitBlocking([this, sourceTextureId, size, outputRevision](IRuntime &runtime) {
+            SubmitTextureResult taskResult;
+            if (!m_impl) {
+                taskResult.error = QStringLiteral("WinAngleTextureWriter was reset before texture submission.");
+                return taskResult;
+            }
+
+            auto *activeRuntime = dynamic_cast<WinAngleRuntime *>(&runtime);
+            if (activeRuntime == nullptr) {
+                taskResult.error = QStringLiteral("WinAngleTextureWriter reached an unexpected runtime type.");
+                return taskResult;
+            }
+
+            m_impl->attachedRuntime.store(&runtime, std::memory_order_release);
+
+            QString enterError;
+            if (!activeRuntime->enter(&enterError)) {
+                taskResult.error = std::move(enterError);
+                return taskResult;
+            }
+
+            taskResult = m_impl->submitTexture(sourceTextureId, size, outputRevision);
+            activeRuntime->leave();
+            return taskResult;
+        });
+    } catch (...) {
         if (error) {
-            *error = std::move(enterError);
+            *error = exceptionMessage(std::current_exception(),
+                                      QStringLiteral("WinAngleTextureWriter failed to submit texture on the runtime executor."));
         }
         return false;
     }
-
-    const SubmitTextureResult result = m_impl->submitTexture(sourceTextureId, size, outputRevision);
-
-    activeRuntime->leave();
 
     switch (result.kind) {
     case SubmitTextureResultKind::Published:
@@ -1230,27 +1269,28 @@ void WinAngleTextureWriter::notifyPresentationCapacityAvailable()
         return;
     }
 
-    RuntimeHost *host = m_impl->runtimeHost();
-    if (host == nullptr) {
+    execution::RuntimeExecutor *executor = m_impl->runtimeExecutor();
+    if (executor == nullptr) {
         m_impl->drainScheduled.store(false, std::memory_order_release);
         return;
     }
 
-    QString dispatchError;
-    const bool dispatched = host->dispatchAsync([this](IRuntime *runtime) {
+    auto future = executor->submit([this](IRuntime &runtime) {
         if (!m_impl) {
             return;
         }
 
         m_impl->drainScheduled.store(false, std::memory_order_release);
 
-        if (!m_impl->hasPendingFrame() || runtime == nullptr || runtime != m_impl->attachedRuntime.load(std::memory_order_acquire)) {
+        if (!m_impl->hasPendingFrame()) {
             return;
         }
 
+        m_impl->attachedRuntime.store(&runtime, std::memory_order_release);
+
         IWriterEvents *events = m_impl->events();
         QString enterError;
-        if (!runtime->enter(&enterError)) {
+        if (!runtime.enter(&enterError)) {
             if (events && !enterError.isEmpty()) {
                 events->onWarning(enterError);
             }
@@ -1258,7 +1298,7 @@ void WinAngleTextureWriter::notifyPresentationCapacityAvailable()
         }
 
         const DrainPendingPublishesResult result = m_impl->drainPendingPublishes();
-        runtime->leave();
+        runtime.leave();
 
         if (events == nullptr) {
             return;
@@ -1270,14 +1310,21 @@ void WinAngleTextureWriter::notifyPresentationCapacityAvailable()
         for (const TextureTicket &ticket : result.tickets) {
             events->onTextureReady(ticket);
         }
-    }, &dispatchError);
-    if (!dispatched) {
+    });
+
+    std::move(future).thenTry([this](async::Try<async::Unit> &&result) {
+        if (!result.hasException() || !m_impl) {
+            return async::Unit();
+        }
+
         m_impl->drainScheduled.store(false, std::memory_order_release);
         IWriterEvents *events = m_impl->events();
-        if (events && !dispatchError.isEmpty()) {
-            events->onWarning(dispatchError);
+        if (events) {
+            events->onWarning(exceptionMessage(result.exception(),
+                                               QStringLiteral("WinAngleTextureWriter failed to drain pending publishes.")));
         }
-    }
+        return async::Unit();
+    });
 }
 
 void WinAngleTextureWriter::reset()
@@ -1286,17 +1333,35 @@ void WinAngleTextureWriter::reset()
         return;
     }
 
-    m_impl->host.store(nullptr, std::memory_order_release);
+    execution::RuntimeExecutor *executor = m_impl->runtimeExecutor();
+    m_impl->executor.store(nullptr, std::memory_order_release);
     m_impl->eventSink.store(nullptr, std::memory_order_release);
     m_impl->drainScheduled.store(false, std::memory_order_release);
 
     if (m_impl->hasGlResources()) {
-        QString unusedError;
-        WinAngleRuntime *activeRuntime = m_impl->runtime();
-        if (activeRuntime && activeRuntime->enter(&unusedError)) {
-            m_impl->shutdown();
-            activeRuntime->leave();
-        } else {
+        bool releasedOnRuntime = false;
+        if (executor && !executor->isShutdown()) {
+            try {
+                executor->submitBlocking([this, &releasedOnRuntime](IRuntime &runtime) {
+                    if (!m_impl) {
+                        return;
+                    }
+
+                    auto *activeRuntime = dynamic_cast<WinAngleRuntime *>(&runtime);
+                    m_impl->attachedRuntime.store(&runtime, std::memory_order_release);
+
+                    QString unusedError;
+                    if (activeRuntime && activeRuntime->enter(&unusedError)) {
+                        m_impl->shutdown();
+                        activeRuntime->leave();
+                        releasedOnRuntime = true;
+                    }
+                });
+            } catch (...) {
+            }
+        }
+
+        if (!releasedOnRuntime) {
             m_impl->shutdown();
         }
     } else {

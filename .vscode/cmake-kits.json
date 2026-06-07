@@ -1,0 +1,51 @@
+[
+    {
+        "name": "clang-cl",
+        "compilers": {
+            "C": "D:/CodePrograms/LLVM/bin/clang-cl.exe",
+            "CXX": "D:/CodePrograms/LLVM/bin/clang-cl.exe"
+        },
+        "preferredGenerator": {
+            "name": "Ninja"
+        },
+        "environmentSetupScript": "D:/CodePrograms/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat",
+        "visualStudio": "VisualStudio.17.0",
+        "visualStudioArchitecture": "x64"
+    },
+    {
+        "name": "msvc",
+        "compilers": {
+            "C": "cl.exe",
+            "CXX": "cl.exe"
+        },
+        "preferredGenerator": {
+            "name": "Ninja"
+        },
+        "environmentSetupScript": "D:/CodePrograms/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat",
+        "visualStudio": "VisualStudio.17.0",
+        "visualStudioArchitecture": "x64"
+    },
+    {
+        "name": "clang",
+        "compilers": {
+            "C": "D:/CodePrograms/LLVM/bin/clang.exe",
+            "CXX": "D:/CodePrograms/LLVM/bin/clang++.exe"
+        },
+        "preferredGenerator": {
+            "name": "Ninja"
+        }
+    },
+    {
+        "name": "mingw",
+        "compilers": {
+            "C": "D:/DevPrograms/msys64/mingw64/bin/gcc.exe",
+            "CXX": "D:/DevPrograms/msys64/mingw64/bin/g++.exe"
+        },
+        "preferredGenerator": {
+            "name": "Ninja"
+        },
+        "environmentVariables": {
+            "PATH": "D:/DevPrograms/msys64/mingw64/bin;${env:PATH}"
+        }
+    }
+]

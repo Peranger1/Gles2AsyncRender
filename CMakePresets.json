@@ -1,0 +1,52 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base-common",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "QFK_ENABLE_TESTS": "ON",
+        "QFK_ENABLE_EXAMPLES": "ON",
+        "QFK_ENABLE_WINDOWKIT": "ON"
+      }
+    },
+    {
+      "name": "base-win-clang",
+      "hidden": true,
+      "inherits": "base-common",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
+      }
+    },
+    {
+      "name": "win-clang-debug",
+      "hidden": true,
+      "inherits": "base-win-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "win-clang-release",
+      "hidden": true,
+      "inherits": "base-win-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ]
+}

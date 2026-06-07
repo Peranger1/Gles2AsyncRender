@@ -6,6 +6,7 @@
 #include "framework/platform/platform_backend.h"
 #include "framework/platform/texture_types.h"
 #include "image_effect_types.h"
+#include "photo_editor/photo_editor_result_types.h"
 
 int main(int argc, char *argv[])
 {
@@ -37,6 +38,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("Gles2AsyncRender"));
     qRegisterMetaType<ImageEffectParameters>("ImageEffectParameters");
     qRegisterMetaType<IPlatformBackend *>("IPlatformBackend*");
+    qRegisterMetaType<RawGpuTextureResult>("RawGpuTextureResult");
     qRegisterMetaType<TextureTicket>("TextureTicket");
     qRegisterMetaType<quint64>("quint64");
 

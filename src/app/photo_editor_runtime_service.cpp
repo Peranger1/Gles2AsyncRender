@@ -10,15 +10,33 @@
 #include <QMutexLocker>
 #include <QPointer>
 
+#include <exception>
+
 namespace
 {
 constexpr const char *kLogScope = "[PhotoEditorRuntimeService]";
 thread_local IRuntime *g_photoEditorInitRuntime = nullptr;
+
+QString exceptionMessage(std::exception_ptr exception, const QString &fallback)
+{
+    if (!exception) {
+        return fallback;
+    }
+
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception &ex) {
+        const QString message = QString::fromStdString(ex.what());
+        return message.isEmpty() ? fallback : message;
+    } catch (...) {
+        return fallback;
+    }
+}
 }
 
-PhotoEditorRuntimeService::PhotoEditorRuntimeService(RuntimeHost *host, QObject *parent)
+PhotoEditorRuntimeService::PhotoEditorRuntimeService(execution::RuntimeExecutor *executor, QObject *parent)
     : QObject(parent)
-    , m_executor(std::make_unique<RuntimeExecutor>(host))
+    , m_executor(executor)
 {
 }
 
@@ -37,18 +55,27 @@ void PhotoEditorRuntimeService::initialize()
         m_initializePosted = true;
     }
 
+    if (m_executor == nullptr) {
+        {
+            QMutexLocker locker(&m_mutex);
+            m_initializePosted = false;
+        }
+        emitWarning(QStringLiteral("Photo editor runtime service requires a runtime executor."));
+        return;
+    }
+
     QPointer<PhotoEditorRuntimeService> service(this);
-    const SubmitResult submit = m_executor->post([service](IRuntime *runtime) {
+    auto future = m_executor->submit([service](IRuntime &runtime) {
         if (service.isNull()) {
             return;
         }
         RuntimeDiagnostics::logInfo(kLogScope, QStringLiteral("[GL] service photo_editor_init"));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         bool ok = false;
         if (scope.ok()) {
-            g_photoEditorInitRuntime = runtime;
+            g_photoEditorInitRuntime = &runtime;
             ok = photo_editor_init([](const char *name) -> void * {
                 return g_photoEditorInitRuntime ? g_photoEditorInitRuntime->resolveProc(name) : nullptr;
             }, &errorText);
@@ -70,15 +97,20 @@ void PhotoEditorRuntimeService::initialize()
         }
     });
 
-    if (!submit.accepted) {
-        {
-            QMutexLocker locker(&m_mutex);
-            m_initializePosted = false;
+    std::move(future).thenTry([service](async::Try<async::Unit> &&result) {
+        if (service.isNull() || !result.hasException()) {
+            return async::Unit();
         }
-        emitWarning(submit.error.message.isEmpty()
-                        ? QStringLiteral("Failed to post photo_editor_init task.")
-                        : submit.error.message);
-    }
+
+        {
+            QMutexLocker locker(&service->m_mutex);
+            service->m_initializePosted = false;
+            service->m_initialized = false;
+        }
+        service->emitWarning(exceptionMessage(result.exception(),
+                                              QStringLiteral("Failed to submit photo_editor_init task.")));
+        return async::Unit();
+    });
 }
 
 std::shared_ptr<PhotoEditorHandleActor> PhotoEditorRuntimeService::createActor(QString sourceKey,
@@ -97,7 +129,7 @@ std::shared_ptr<PhotoEditorHandleActor> PhotoEditorRuntimeService::createActor(Q
 
         const quint64 actorId = ++m_nextActorId;
         actor = std::make_shared<PhotoEditorHandleActor>(actorId,
-                                                         m_executor.get(),
+                                                         m_executor,
                                                          std::move(sourceKey),
                                                          sourceImageCacheKey,
                                                          std::move(sourceImage));
@@ -131,10 +163,6 @@ void PhotoEditorRuntimeService::shutdown()
                                 : error);
             }
         }
-    }
-
-    if (m_executor) {
-        m_executor->shutdown();
     }
 }
 

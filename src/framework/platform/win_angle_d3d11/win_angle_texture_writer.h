@@ -12,7 +12,7 @@ public:
     explicit WinAngleTextureWriter(const std::shared_ptr<D3D11SharedTextureSlots> &slotPool);
     ~WinAngleTextureWriter() override;
 
-    void attach(RuntimeHost *host, IRuntime *runtime, IWriterEvents *events) override;
+    void attach(execution::RuntimeExecutor *executor, IWriterEvents *events) override;
     bool submitTexture(GLuint sourceTextureId,
                        const QSize &size,
                        quint64 outputRevision,

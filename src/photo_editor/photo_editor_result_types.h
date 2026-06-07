@@ -4,6 +4,7 @@
 
 #include <QImage>
 #include <QMap>
+#include <QMetaType>
 #include <QSize>
 #include <QString>
 #include <QVariant>
@@ -20,3 +21,5 @@ struct CpuImageResult final
     QImage image;
     QMap<QString, QVariant> metadata;
 };
+
+Q_DECLARE_METATYPE(RawGpuTextureResult)

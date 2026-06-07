@@ -11,7 +11,17 @@
 
 #include <memory>
 
+namespace async
+{
+struct Unit;
+template <typename T>
+class Future;
+}
+
+namespace execution
+{
 class RuntimeExecutor;
+}
 
 class PhotoEditorHandleActor final : public QObject, public std::enable_shared_from_this<PhotoEditorHandleActor>
 {
@@ -33,7 +43,7 @@ public:
     };
 
     PhotoEditorHandleActor(quint64 actorId,
-                           RuntimeExecutor *executor,
+                           execution::RuntimeExecutor *executor,
                            QString sourceKey,
                            quint64 sourceImageCacheKey,
                            std::shared_ptr<const QImage> sourceImage,
@@ -64,6 +74,10 @@ private:
     void postProcessTask(quint64 generation);
     void postRenderTask(quint64 generation);
     void postDestroyTask(void *handle, quint64 generation);
+    void observeTask(async::Future<async::Unit> future,
+                     quint64 generation,
+                     QString fallback,
+                     bool failCurrent);
 
     void onProcessCompleted(quint64 generation, int progress);
     void handlePhotoEditorProgress(int progress, bool isEnd);
@@ -76,7 +90,7 @@ private:
     static QString stateName(State state);
 
     quint64 m_actorId = 0;
-    RuntimeExecutor *m_executor = nullptr;
+    execution::RuntimeExecutor *m_executor = nullptr;
     void *m_handle = nullptr;
     QString m_sourceKey;
     quint64 m_sourceImageCacheKey = 0;

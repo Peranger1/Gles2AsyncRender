@@ -53,19 +53,14 @@
   - macOS Cocoa OpenGL + `IOSurface` 平台实现
 
 - `framework/execution`
-  - `ExecutionOutcome`
-  - `RuntimeHost`
-  - `QtRuntimeHost`
+  - `async::Future` / `async::Promise`
+  - `async::Executor`
+  - `execution::TaskScheduler`
   - `RuntimeScope`
   - `RuntimeExecutor`
-  - `AsyncLane`
-  - `SyncLane`
-  - `execution::SerialQueue<N>`
-  - `execution::MergeWhileBusyQueue<N>`
-  - `execution::DeliverEveryStartedResult`
-  - `execution::DropStaleStartedResults`
-  - `QueuePolicyKind`
-  - `DeliveryPolicyKind`
+  - `SerialLane`
+  - `LatestLane`
+  - `MergeLane`
 
 - `app`
   - `TexturePresentWidget`
@@ -95,17 +90,17 @@
 
 - [src/app/photo_editor_app_session.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_app_session.cpp)
   - 管理图片目录、当前图片、当前参数
-  - 持有 `QtRuntimeHost` 和 `PhotoEditorRuntimeService`
+  - 持有 `execution::RuntimeExecutor` 和 `PhotoEditorRuntimeService`
   - 为当前图片选择或创建 `PhotoEditorHandleActor`
   - GPU 预览通过 actor 的 `setOutputSize()`、`setOpcode()`、`process()` 单步入口触发
   - 不直接调用 `photo_editor_*`
   - CPU 预览由 app session 内部同步函数直接生成，不再包进 renderer 类
   - 在 GPU 结果完成后调用 `IWriter`
-  - 初始化时把 `RuntimeHost` / `IRuntime` attach 给 `IWriter`
+  - 初始化时把同一个 `execution::RuntimeExecutor` attach 给 `IWriter`
   - 按 widget 下发的 `outputRevision` 发布纹理结果
 
 - [src/app/photo_editor_runtime_service.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/app/photo_editor_runtime_service.cpp)
-  - 持有 `RuntimeExecutor`
+  - 引用 app session 持有的 `execution::RuntimeExecutor`
   - 将 `photo_editor_init` 作为独立 GL task 提交
   - 创建并管理 per-handle actor
   - shutdown 时同步销毁 actor handle，保证 runtime 关闭前完成清理
@@ -118,12 +113,9 @@
   - 使用 generation token 屏蔽旧 task、旧 callback 和 destroy 后结果
 
 - [src/framework/execution/runtime_executor.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/runtime_executor.cpp)
-  - 通用 GL task 执行器
-  - 提供 `post(void(IRuntime *))` 和 `call(void(IRuntime *))`
+  - 拥有 `IRuntime` 并通过 `async::SingleThreadExecutor` 顺序执行 runtime task
+  - 提供 `initialize()`、`submit()`、`submitBlocking()` 和 `shutdown()`
   - 不包含 photo editor 业务类型或合并策略
-
-- [src/framework/execution/qt_runtime_host.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/qt_runtime_host.cpp)
-  - 基于 Qt 事件循环的 `RuntimeHost` 实现
 
 - [src/framework/execution/async_lane.h](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/execution/async_lane.h)
   - 通用异步执行 lane
@@ -138,7 +130,7 @@
 - [src/framework/platform/win_angle_d3d11/win_angle_texture_writer.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_texture_writer.cpp)
   - GPU 结果发布为 `TextureTicket`
   - 共享纹理槽采用多 `Ready` 队列，而不是单 pending 槽
-  - `IWriter` 显式依赖 `RuntimeHost` / `IRuntime` / `IWriterEvents`
+  - `IWriter` 显式依赖 `execution::RuntimeExecutor` / `IWriterEvents`
   - 无空闲展示槽时由 writer 在平台层缓存 latest pending frame，并在槽释放后自驱动继续发布
 
 - [src/framework/platform/win_angle_d3d11/win_angle_texture_reader.cpp](/D:/Desktop/AI-Agent/Gles2AsyncRender/src/framework/platform/win_angle_d3d11/win_angle_texture_reader.cpp)
@@ -184,7 +176,7 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 ## 当前调度与展示语义
 
 - GPU 预览主路径已经从 `AsyncLane<GpuPreviewRequest, ...>` 迁移到 per-handle actor：
-  - `RuntimeExecutor` 只按提交顺序执行 `void(IRuntime *)`
+  - `execution::RuntimeExecutor` 拥有 runtime，并按提交顺序执行 `IRuntime&` task
   - `PhotoEditorRuntimeService` 负责 `photo_editor_init` 和 actor 生命周期
   - `PhotoEditorHandleActor` 负责 handle 状态、latest-only 参数、process-again 和 generation 防护
   - `setOutputSize()`、`setOpcode()`、`process()` 支持跨线程调用
@@ -192,10 +184,10 @@ powershell -ExecutionPolicy Bypass -File D:\Desktop\AI-Agent\Gles2AsyncRender\sc
 - `AsyncLane` / `SyncLane` 仍保留在 execution 层，但不再是 photo editor GPU 预览主路径。
 - 平台纹理发布不是 latest-only：
   - `D3D11SharedTextureSlots` 维护多 `Ready` 槽队列
-  - `IWriter::submitTexture()` 显式在调用方提供的 runtime 上下文里发布纹理
+  - `IWriter::submitTexture()` 通过已 attach 的 `execution::RuntimeExecutor` 同步进入 runtime 线程发布纹理
   - 无空闲展示槽时，writer 在平台层暂存 latest pending frame，而不是把 retry 责任抛回 app
   - `IReader` 在释放 reader lease 后直接通知 writer 当前出现新的 publish capacity
-  - writer 通过已 attach 的 `RuntimeHost` 回到 worker 线程自驱动 drain pending publish
+  - writer 通过已 attach 的 `execution::RuntimeExecutor` 自驱动 drain pending publish
   - writer 通过 `IWriterEvents` 统一发出 `TextureTicket` 和 warning
   - UI 侧通过 `PlatformPresentationEvents::textureReady` 顺序消费可用 `TextureTicket`
   - `TextureTicket.outputRevision` 用于隔离 resize 前后的结果，避免旧尺寸帧继续显示

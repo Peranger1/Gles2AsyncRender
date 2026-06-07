@@ -5,11 +5,13 @@
 #include "runtime_diagnostics.h"
 
 #include <QByteArray>
+#include <QMetaObject>
 #include <QThread>
 #include <QTimer>
 #include <QtMath>
 
 #include <memory>
+#include <mutex>
 
 namespace
 {
@@ -28,6 +30,7 @@ struct PhotoEditorHandleState final
     bool processCompleted = false;
     quint64 processGeneration = 0;
     bool destroyed = false;
+    std::mutex processMutex;
 
     GLuint sourceTextureId = 0;
     GLuint outputTextureId = 0;
@@ -344,20 +347,39 @@ void scheduleProgressStep(const std::shared_ptr<PhotoEditorHandleState> &state,
                           int progress,
                           bool isEnd)
 {
-    QTimer::singleShot(delayMs, callbackContext, [state, callback, userData, generation, progress, isEnd]() {
-        if (!state || state->destroyed || state->processGeneration != generation) {
-            return;
-        }
+    const bool invoked = QMetaObject::invokeMethod(
+        callbackContext,
+        [state, callbackContext, callback, userData, generation, delayMs, progress, isEnd]() {
+            QTimer::singleShot(delayMs, callbackContext, [state, callback, userData, generation, progress, isEnd]() {
+                if (!state) {
+                    return;
+                }
 
-        if (isEnd) {
+                {
+                    std::lock_guard<std::mutex> lock(state->processMutex);
+                    if (state->destroyed || state->processGeneration != generation) {
+                        return;
+                    }
+
+                    if (isEnd) {
+                        state->processActive = false;
+                        state->processCompleted = true;
+                    }
+                }
+
+                if (callback != nullptr) {
+                    callback(progress, isEnd, userData);
+                }
+            });
+        },
+        Qt::QueuedConnection);
+
+    if (!invoked && state && isEnd) {
+        std::lock_guard<std::mutex> lock(state->processMutex);
+        if (state->processGeneration == generation) {
             state->processActive = false;
-            state->processCompleted = true;
         }
-
-        if (callback != nullptr) {
-            callback(progress, isEnd, userData);
-        }
-    });
+    }
 }
 }
 
@@ -418,10 +440,13 @@ void photo_editor_destroy(void *handle)
         return;
     }
 
-    ownedHandle->state->destroyed = true;
-    ++ownedHandle->state->processGeneration;
-    ownedHandle->state->processActive = false;
-    ownedHandle->state->processCompleted = false;
+    {
+        std::lock_guard<std::mutex> lock(ownedHandle->state->processMutex);
+        ownedHandle->state->destroyed = true;
+        ++ownedHandle->state->processGeneration;
+        ownedHandle->state->processActive = false;
+        ownedHandle->state->processCompleted = false;
+    }
     releaseGlResources(ownedHandle->state.get());
 }
 
@@ -476,17 +501,21 @@ bool photo_editor_process(void *handle,
         }
         return false;
     }
-    if (photoHandle->state->processActive) {
-        if (error) {
-            *error = QStringLiteral("photo_editor_process does not support re-entry while processing is active.");
-        }
-        return false;
-    }
-
-    photoHandle->state->processActive = true;
-    photoHandle->state->processCompleted = false;
-    const quint64 generation = ++photoHandle->state->processGeneration;
     const std::shared_ptr<PhotoEditorHandleState> state = photoHandle->state;
+    quint64 generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(state->processMutex);
+        if (state->processActive) {
+            if (error) {
+                *error = QStringLiteral("photo_editor_process does not support re-entry while processing is active.");
+            }
+            return false;
+        }
+
+        state->processActive = true;
+        state->processCompleted = false;
+        generation = ++state->processGeneration;
+    }
 
     scheduleProgressStep(state, callbackContext, callback, userData, generation, 10, 20, false);
     scheduleProgressStep(state, callbackContext, callback, userData, generation, 30, 55, false);
@@ -503,11 +532,14 @@ bool photo_editor_render(void *handle, GLuint *textureId, QSize *size, QString *
         }
         return false;
     }
-    if (!photoHandle->state->processCompleted) {
-        if (error) {
-            *error = QStringLiteral("photo_editor_render requires a completed process result.");
+    {
+        std::lock_guard<std::mutex> lock(photoHandle->state->processMutex);
+        if (!photoHandle->state->processCompleted) {
+            if (error) {
+                *error = QStringLiteral("photo_editor_render requires a completed process result.");
+            }
+            return false;
         }
-        return false;
     }
     if (textureId == nullptr || size == nullptr) {
         if (error) {

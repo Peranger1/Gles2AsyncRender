@@ -46,3 +46,6 @@ Makefile.Release
 *.sln
 *.ninja
 *.cmake.user
+
+# .vs .vscode
+.vs/

@@ -1,0 +1,40 @@
+{
+    "buildType": {
+        "default": "release",
+        "description": "构建类型",
+        "choices": {
+            "debug": {
+                "short": "Debug",
+                "long": "调试构建（带符号信息）",
+                "buildType": "Debug",
+                "settings": {
+                    "CMAKE_BUILD_TYPE": "Debug"
+                }
+            },
+            "release": {
+                "short": "Release",
+                "long": "发布构建（优化）",
+                "buildType": "Release",
+                "settings": {
+                    "CMAKE_BUILD_TYPE": "Release"
+                }
+            },
+            "relwithdebinfo": {
+                "short": "RelWithDebInfo",
+                "long": "带调试信息的发布构建",
+                "buildType": "RelWithDebInfo",
+                "settings": {
+                    "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+                }
+            },
+            "minsizerel": {
+                "short": "MinSizeRel",
+                "long": "最小体积发布构建",
+                "buildType": "MinSizeRel",
+                "settings": {
+                    "CMAKE_BUILD_TYPE": "MinSizeRel"
+                }
+            }
+        }
+    }
+}

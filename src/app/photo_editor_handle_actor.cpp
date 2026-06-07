@@ -9,6 +9,8 @@
 #include <QMutexLocker>
 #include <QVariant>
 
+#include <exception>
+
 namespace
 {
 constexpr const char *kLogScope = "[PhotoEditorHandleActor]";
@@ -22,10 +24,26 @@ QString emptyErrorFallback(const QString &message, const QString &fallback)
 {
     return message.isEmpty() ? fallback : message;
 }
+
+QString exceptionMessage(std::exception_ptr exception, const QString &fallback)
+{
+    if (!exception) {
+        return fallback;
+    }
+
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception &ex) {
+        const QString message = QString::fromStdString(ex.what());
+        return emptyErrorFallback(message, fallback);
+    } catch (...) {
+        return fallback;
+    }
+}
 }
 
 PhotoEditorHandleActor::PhotoEditorHandleActor(quint64 actorId,
-                                               RuntimeExecutor *executor,
+                                               execution::RuntimeExecutor *executor,
                                                QString sourceKey,
                                                quint64 sourceImageCacheKey,
                                                std::shared_ptr<const QImage> sourceImage,
@@ -220,7 +238,11 @@ bool PhotoEditorHandleActor::destroySync(QString *error)
     }
 
     QString barrierError;
-    if (!m_executor->call([](IRuntime *) {}, &barrierError)) {
+    try {
+        m_executor->submitBlocking([](IRuntime &) {});
+    } catch (...) {
+        barrierError = exceptionMessage(std::current_exception(),
+                                        QStringLiteral("Failed to drain photo editor actor tasks before destroy."));
         if (error) {
             *error = emptyErrorFallback(barrierError,
                                         QStringLiteral("Failed to drain photo editor actor tasks before destroy."));
@@ -254,19 +276,26 @@ bool PhotoEditorHandleActor::destroySync(QString *error)
     QString callError;
     QString destroyError;
     bool didDestroy = false;
-    const bool called = m_executor->call([handle, actorId, generation, &didDestroy, &destroyError](IRuntime *runtime) {
-        RuntimeDiagnostics::logInfo(kLogScope,
-                                    QStringLiteral("[GL] actor#%1 gen=%2 photo_editor_destroy")
-                                        .arg(actorId)
-                                        .arg(generation));
+    bool called = false;
+    try {
+        m_executor->submitBlocking([handle, actorId, generation, &didDestroy, &destroyError](IRuntime &runtime) {
+            RuntimeDiagnostics::logInfo(kLogScope,
+                                        QStringLiteral("[GL] actor#%1 gen=%2 photo_editor_destroy")
+                                            .arg(actorId)
+                                            .arg(generation));
 
-        RuntimeScope scope(runtime, &destroyError);
-        if (!scope.ok()) {
-            return;
-        }
-        photo_editor_destroy(handle);
-        didDestroy = true;
-    }, &callError);
+            RuntimeScope scope(&runtime, &destroyError);
+            if (!scope.ok()) {
+                return;
+            }
+            photo_editor_destroy(handle);
+            didDestroy = true;
+        });
+        called = true;
+    } catch (...) {
+        callError = exceptionMessage(std::current_exception(),
+                                     QStringLiteral("Failed to synchronously submit photo_editor_destroy task."));
+    }
 
     {
         QMutexLocker locker(&m_mutex);
@@ -289,6 +318,44 @@ bool PhotoEditorHandleActor::destroySync(QString *error)
     return true;
 }
 
+void PhotoEditorHandleActor::observeTask(async::Future<async::Unit> future,
+                                         quint64 generation,
+                                         QString fallback,
+                                         bool failCurrent)
+{
+    if (!future.valid()) {
+        const QString message = emptyErrorFallback(fallback, QStringLiteral("Runtime task submission returned an invalid future."));
+        if (failCurrent) {
+            failIfCurrent(generation, message);
+        } else {
+            warn(message);
+        }
+        return;
+    }
+
+    std::move(future).thenTry([weakActor = weak_from_this(),
+                               generation,
+                               fallback = std::move(fallback),
+                               failCurrent](async::Try<async::Unit> &&result) {
+        if (!result.hasException()) {
+            return async::Unit();
+        }
+
+        const auto self = weakActor.lock();
+        if (!self) {
+            return async::Unit();
+        }
+
+        const QString message = exceptionMessage(result.exception(), fallback);
+        if (failCurrent) {
+            self->failIfCurrent(generation, message);
+        } else {
+            self->warn(message);
+        }
+        return async::Unit();
+    });
+}
+
 void PhotoEditorHandleActor::postCreateTask(quint64 generation)
 {
     if (m_executor == nullptr) {
@@ -297,7 +364,7 @@ void PhotoEditorHandleActor::postCreateTask(quint64 generation)
     }
 
     const auto weakActor = weak_from_this();
-    const SubmitResult submit = m_executor->post([weakActor, generation](IRuntime *runtime) {
+    auto future = m_executor->submit([weakActor, generation](IRuntime &runtime) {
         const auto self = weakActor.lock();
         if (!self) {
             return;
@@ -323,7 +390,7 @@ void PhotoEditorHandleActor::postCreateTask(quint64 generation)
                                         .arg(generation));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         void *createdHandle = nullptr;
         if (scope.ok()) {
             createdHandle = photo_editor_create(sourceImage ? *sourceImage : QImage(), &errorText);
@@ -379,9 +446,10 @@ void PhotoEditorHandleActor::postCreateTask(quint64 generation)
         }
     });
 
-    if (!submit.accepted) {
-        failIfCurrent(generation, submit.error.message);
-    }
+    observeTask(std::move(future),
+                generation,
+                QStringLiteral("Failed to submit photo_editor_create task."),
+                true);
 }
 
 void PhotoEditorHandleActor::postSetOutputSizeTask(quint64 generation)
@@ -392,7 +460,7 @@ void PhotoEditorHandleActor::postSetOutputSizeTask(quint64 generation)
     }
 
     const auto weakActor = weak_from_this();
-    const SubmitResult submit = m_executor->post([weakActor, generation](IRuntime *runtime) {
+    auto future = m_executor->submit([weakActor, generation](IRuntime &runtime) {
         const auto self = weakActor.lock();
         if (!self) {
             return;
@@ -416,7 +484,7 @@ void PhotoEditorHandleActor::postSetOutputSizeTask(quint64 generation)
                                         .arg(generation));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         const bool ok = scope.ok() && photo_editor_set_output_size(handle, outputSize, &errorText);
 
         bool repost = false;
@@ -442,9 +510,10 @@ void PhotoEditorHandleActor::postSetOutputSizeTask(quint64 generation)
         }
     });
 
-    if (!submit.accepted) {
-        failIfCurrent(generation, submit.error.message);
-    }
+    observeTask(std::move(future),
+                generation,
+                QStringLiteral("Failed to submit photo_editor_set_output_size task."),
+                true);
 }
 
 void PhotoEditorHandleActor::postSetOpcodeTask(quint64 generation)
@@ -455,7 +524,7 @@ void PhotoEditorHandleActor::postSetOpcodeTask(quint64 generation)
     }
 
     const auto weakActor = weak_from_this();
-    const SubmitResult submit = m_executor->post([weakActor, generation](IRuntime *runtime) {
+    auto future = m_executor->submit([weakActor, generation](IRuntime &runtime) {
         const auto self = weakActor.lock();
         if (!self) {
             return;
@@ -479,7 +548,7 @@ void PhotoEditorHandleActor::postSetOpcodeTask(quint64 generation)
                                         .arg(generation));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         const bool ok = scope.ok() && photo_editor_set_opcode(handle, parameters, &errorText);
 
         bool repost = false;
@@ -516,9 +585,10 @@ void PhotoEditorHandleActor::postSetOpcodeTask(quint64 generation)
         }
     });
 
-    if (!submit.accepted) {
-        failIfCurrent(generation, submit.error.message);
-    }
+    observeTask(std::move(future),
+                generation,
+                QStringLiteral("Failed to submit photo_editor_set_opcode task."),
+                true);
 }
 
 void PhotoEditorHandleActor::postProcessTask(quint64 generation)
@@ -529,7 +599,7 @@ void PhotoEditorHandleActor::postProcessTask(quint64 generation)
     }
 
     const auto weakActor = weak_from_this();
-    const SubmitResult submit = m_executor->post([weakActor, generation](IRuntime *runtime) {
+    auto future = m_executor->submit([weakActor, generation](IRuntime &runtime) {
         const auto self = weakActor.lock();
         if (!self) {
             return;
@@ -553,7 +623,7 @@ void PhotoEditorHandleActor::postProcessTask(quint64 generation)
                                         .arg(generation));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         const bool ok = scope.ok()
             && photo_editor_process(handle, self.get(), &PhotoEditorHandleActor::onPhotoEditorProgress, self.get(), &errorText);
 
@@ -573,9 +643,10 @@ void PhotoEditorHandleActor::postProcessTask(quint64 generation)
         }
     });
 
-    if (!submit.accepted) {
-        failIfCurrent(generation, submit.error.message);
-    }
+    observeTask(std::move(future),
+                generation,
+                QStringLiteral("Failed to submit photo_editor_process task."),
+                true);
 }
 
 void PhotoEditorHandleActor::postRenderTask(quint64 generation)
@@ -586,7 +657,7 @@ void PhotoEditorHandleActor::postRenderTask(quint64 generation)
     }
 
     const auto weakActor = weak_from_this();
-    const SubmitResult submit = m_executor->post([weakActor, generation](IRuntime *runtime) {
+    auto future = m_executor->submit([weakActor, generation](IRuntime &runtime) {
         const auto self = weakActor.lock();
         if (!self) {
             return;
@@ -611,7 +682,7 @@ void PhotoEditorHandleActor::postRenderTask(quint64 generation)
                                         .arg(generation));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         RawGpuTextureResult result;
         const bool ok = scope.ok() && photo_editor_render(handle, &result.textureId, &result.size, &errorText);
         result.metadata.insert(QStringLiteral("actorId"), qulonglong(self->m_actorId));
@@ -648,9 +719,10 @@ void PhotoEditorHandleActor::postRenderTask(quint64 generation)
         }
     });
 
-    if (!submit.accepted) {
-        failIfCurrent(generation, submit.error.message);
-    }
+    observeTask(std::move(future),
+                generation,
+                QStringLiteral("Failed to submit photo_editor_render task."),
+                true);
 }
 
 void PhotoEditorHandleActor::postDestroyTask(void *handle, quint64 generation)
@@ -665,16 +737,16 @@ void PhotoEditorHandleActor::postDestroyTask(void *handle, quint64 generation)
 
     const auto weakActor = weak_from_this();
     const quint64 actorId = m_actorId;
-    const SubmitResult submit = m_executor->post([weakActor, handle, actorId, generation](IRuntime *runtime) {
+    auto future = m_executor->submit([weakActor, handle, actorId, generation](IRuntime &runtime) {
         const auto self = weakActor.lock();
 
         RuntimeDiagnostics::logInfo(kLogScope,
                                     QStringLiteral("[GL] actor#%1 gen=%2 photo_editor_destroy")
                                         .arg(actorId)
-                                        .arg(generation));
+                                            .arg(generation));
 
         QString errorText;
-        RuntimeScope scope(runtime, &errorText);
+        RuntimeScope scope(&runtime, &errorText);
         if (!scope.ok()) {
             if (self) {
                 {
@@ -704,9 +776,10 @@ void PhotoEditorHandleActor::postDestroyTask(void *handle, quint64 generation)
         }
     });
 
-    if (!submit.accepted) {
-        warn(emptyErrorFallback(submit.error.message, QStringLiteral("Failed to post photo_editor_destroy task.")));
-    }
+    observeTask(std::move(future),
+                generation,
+                QStringLiteral("Failed to submit photo_editor_destroy task."),
+                false);
 }
 
 void PhotoEditorHandleActor::onProcessCompleted(quint64 generation, int progress)

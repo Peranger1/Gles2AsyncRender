@@ -65,31 +65,19 @@
 ### `src/framework/execution`
 
 - `execution_common.h`
-  - `ExecutionOutcome`
-  - `ExecutionError`
-  - `TaskContext`
-  - `QueuePolicyKind`
-  - `DeliveryPolicyKind`
-
-- `runtime_host.h`
-  - runtime 线程调度合同
-
-- `qt_runtime_host.*`
-  - 基于 Qt 事件循环的 `RuntimeHost` 默认实现
+  - execution 聚合兼容头
 
 - `runtime_scope.*`
   - `IRuntime::enter()/leave()` 的 RAII 包装
 
 - `runtime_executor.*`
-  - 通用 GL task 执行器
-  - 提供 `post(void(IRuntime *))` 与 `call(void(IRuntime *))`
-  - 只负责进入 runtime 线程并顺序执行闭包
+  - 拥有 `IRuntime`
+  - 通过 `async::SingleThreadExecutor` 顺序执行 runtime task
+  - 提供 `initialize()`、`submit()`、`submitBlocking()` 与 `shutdown()`
   - 不包含 photo editor 业务类型、合并策略或结果发布逻辑
 
-- `async_lane.h`
-  - 异步 lane
-  - 通过模板参数选择 queue policy、delivery policy、waiting merger
-  - 当前作为可选执行工具保留，不再是 photo editor GPU 预览主路径
+- `execution.h`
+  - 聚合 `Future`、`TaskScheduler`、`SerialLane`、`LatestLane`、`MergeLane`
 
 - `sync_lane.h`
   - 同步 lane 基础接口
@@ -106,17 +94,17 @@
 
 - `photo_editor_app_session.*`
   - 管理目录、当前图片、当前参数
-  - 持有 `QtRuntimeHost`
+  - 持有 `execution::RuntimeExecutor`
   - 持有 `PhotoEditorRuntimeService`
   - 为当前图片选择或创建 `PhotoEditorHandleActor`
   - 通过 actor 的 `setOutputSize()`、`setOpcode()`、`process()` 触发 GPU 预览
   - 不直接调用 `photo_editor_*`
   - CPU 预览是 app session 的同步单步函数，不再封装为 renderer 类
-  - 初始化时把 `RuntimeHost` / `IRuntime` attach 给 `IWriter`
+  - 初始化时把同一个 `execution::RuntimeExecutor` attach 给 `IWriter`
   - 在 GPU 结果完成后调用 `IWriter::submitTexture()`
 
 - `photo_editor_runtime_service.*`
-  - 持有 `RuntimeExecutor`
+  - 引用 app session 持有的 `execution::RuntimeExecutor`
   - 将 `photo_editor_init` 作为独立 GL task 提交
   - 创建并管理 per-handle actor
   - shutdown 时同步销毁 actor handle，保证 runtime 关闭前完成清理
@@ -179,14 +167,14 @@ GPU 结果由 `PhotoEditorHandleActor::renderResult` 交回 app，app 在 `handl
 
 当前 `IWriter` 发布合同是：
 
-- `attach(RuntimeHost *, IRuntime *, IWriterEvents *)`
-  - 显式注入 writer 需要依赖的调度器、runtime 和事件出口
+- `attach(execution::RuntimeExecutor *, IWriterEvents *)`
+  - 显式注入 writer 需要依赖的 runtime executor 和事件出口
 - `submitTexture(GLuint sourceTextureId, QSize size, quint64 outputRevision, QString *error)`
-  - 在调用方提供的 runtime 上下文里尝试立即发布
+  - 通过 runtime executor 同步进入 runtime 线程尝试发布
   - 若当前没有可立即发布的展示槽，writer 在平台层保留 latest pending frame
 - `notifyPresentationCapacityAvailable()`
   - 由 reader 在释放展示槽后调用
-  - writer 内部通过已 attach 的 `RuntimeHost` 回到 worker 线程继续 drain pending publish
+  - writer 内部通过已 attach 的 `execution::RuntimeExecutor` 继续 drain pending publish
 
 当前 `TextureTicket` 除 `slotIndex / generation / frameIndex / size` 外，还携带：
 
@@ -204,7 +192,7 @@ GPU 结果由 `PhotoEditorHandleActor::renderResult` 交回 app，app 在 `handl
 - reader 读取 `Ready` 槽后把它转成 `Reading`
 - UI 复制完成后释放为 `Free`
 - reader 在释放 `Reading` 槽后，直接通知 writer 当前出现新的 publish capacity
-- writer 通过已 attach 的 `RuntimeHost` 回到 worker 线程自驱动 drain pending publish
+- writer 通过已 attach 的 `execution::RuntimeExecutor` 自驱动 drain pending publish
 - writer 通过 `IWriterEvents` 统一发出 `TextureTicket` 与 warning
 
 ## 当前线程与运行时边界
@@ -215,14 +203,13 @@ GPU 结果由 `PhotoEditorHandleActor::renderResult` 交回 app，app 在 `handl
 
 - app worker 线程
   - `PhotoEditorAppSession`
-  - `QtRuntimeHost`
 
-- runtime
+- runtime executor 线程
   - `WinAngleRuntime`
   - `MacCocoaGlRuntime`
-  - 由 `QtRuntimeHost` 管理进入/退出
+  - 由 `execution::RuntimeExecutor` 通过 `async::SingleThreadExecutor` 管理初始化、任务执行和关闭
 
-`PhotoEditorAppSession` 不直接触碰 `photo_editor_*` 或 GLES2 资源；这些调用被限制在 `PhotoEditorRuntimeService` / `PhotoEditorHandleActor` 提交给 `RuntimeExecutor` 的 GL task 内。平台补发链路仍由 `IWriter` / 平台 backend 负责。
+`PhotoEditorAppSession` 不直接触碰 `photo_editor_*` 或 GLES2 资源；这些调用被限制在 `PhotoEditorRuntimeService` / `PhotoEditorHandleActor` 提交给 `execution::RuntimeExecutor` 的 GL task 内。平台补发链路仍由 `IWriter` / 平台 backend 负责。
 
 当前状态补充：
 
