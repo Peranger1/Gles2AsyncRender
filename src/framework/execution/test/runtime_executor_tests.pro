@@ -12,6 +12,7 @@ SOURCES += \
     ../runtime_executor.cpp
 
 HEADERS += \
+    test_harness.h \
     ../future/async.h \
     ../future/async_future.h \
     ../future/combinators.h \

@@ -103,6 +103,8 @@ public:
             if constexpr (std::is_void<RawResult>::value) {
                 std::forward<F>(func)(*state->runtime);
                 return async::Unit();
+            } else if constexpr (async::detail::IsFuture<RawResult>::value) {
+                return std::forward<F>(func)(*state->runtime).get();
             } else {
                 return std::forward<F>(func)(*state->runtime);
             }

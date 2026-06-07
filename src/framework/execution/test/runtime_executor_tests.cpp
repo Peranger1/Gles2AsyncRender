@@ -1,10 +1,12 @@
 #include "framework/execution/runtime_executor.h"
+#include "framework/execution/test/test_harness.h"
 
 #include <QString>
 
+#include <condition_variable>
 #include <functional>
-#include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -13,6 +15,9 @@
 
 namespace
 {
+using execution_test::require;
+using execution_test::requireThrows;
+
 struct RuntimeEvents final
 {
     std::thread::id initializeThread;
@@ -82,38 +87,6 @@ private:
     bool m_initializeResult = true;
 };
 
-class TestFailure final : public std::runtime_error
-{
-public:
-    explicit TestFailure(const std::string &message)
-        : std::runtime_error(message)
-    {
-    }
-};
-
-void require(bool condition, const std::string &message)
-{
-    if (!condition) {
-        throw TestFailure(message);
-    }
-}
-
-template <typename Exception, typename F>
-void requireThrows(F &&func, const std::string &message)
-{
-    try {
-        func();
-    } catch (const Exception &) {
-        return;
-    } catch (const std::exception &e) {
-        throw TestFailure(message + ": threw unexpected exception `" + e.what() + "`");
-    } catch (...) {
-        throw TestFailure(message + ": threw unexpected non-standard exception");
-    }
-
-    throw TestFailure(message + ": did not throw");
-}
-
 void initializeRunsOnRuntimeThread()
 {
     auto events = std::make_shared<RuntimeEvents>();
@@ -143,6 +116,19 @@ void initializeFailureBecomesFutureException()
     }, "RuntimeExecutor should surface initialize failure");
 }
 
+void initializeIsIdempotent()
+{
+    auto events = std::make_shared<RuntimeEvents>();
+    auto runtime = std::make_unique<FakeRuntime>(events);
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+
+    runtimeExecutor.initialize().get();
+    runtimeExecutor.initialize().get();
+
+    require(events->initializeCount == 1, "RuntimeExecutor should initialize runtime only once");
+    runtimeExecutor.shutdown().get();
+}
+
 void submitRunsOnRuntimeThreadAndReturnsValue()
 {
     auto events = std::make_shared<RuntimeEvents>();
@@ -163,6 +149,74 @@ void submitRunsOnRuntimeThreadAndReturnsValue()
             "RuntimeExecutor should run submitted task on initialize thread");
     require(events->leaveThread == events->initializeThread,
             "RuntimeExecutor should leave on initialize thread");
+
+    runtimeExecutor.shutdown().get();
+}
+
+void submitFlattensReturnedFuture()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto innerPromise = std::make_shared<async::Promise<int>>();
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool submitted = false;
+
+    auto future = runtimeExecutor.submit([innerPromise, &mutex, &cv, &submitted](IRuntime &) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            submitted = true;
+        }
+        cv.notify_one();
+        return innerPromise->getFuture();
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&]() {
+            return submitted;
+        });
+    }
+
+    require(!future.isReady(), "RuntimeExecutor should wait for pending returned futures");
+    innerPromise->setValue(42);
+    require(future.get() == 42, "RuntimeExecutor should flatten returned futures");
+
+    runtimeExecutor.shutdown().get();
+}
+
+void submitPropagatesReturnedFutureException()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto future = runtimeExecutor.submit([](IRuntime &) {
+        return async::makeExceptionFuture<int>(std::make_exception_ptr(std::runtime_error("returned")));
+    });
+
+    requireThrows<std::runtime_error>([&]() {
+        future.get();
+    }, "RuntimeExecutor should propagate returned future exceptions");
+
+    runtimeExecutor.shutdown().get();
+}
+
+void submitRejectsInvalidReturnedFuture()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto future = runtimeExecutor.submit([](IRuntime &) {
+        return async::Future<int>();
+    });
+
+    requireThrows<async::FutureInvalid>([&]() {
+        future.get();
+    }, "RuntimeExecutor should reject invalid returned futures");
 
     runtimeExecutor.shutdown().get();
 }
@@ -196,6 +250,92 @@ void submitRejectsAfterShutdown()
     }, "RuntimeExecutor should reject submit after shutdown");
 }
 
+void submitBlockingRunsInlineOnRuntimeThread()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto future = runtimeExecutor.submit([&runtimeExecutor](IRuntime &) {
+        return runtimeExecutor.submitBlocking([](IRuntime &) {
+            return 42;
+        });
+    });
+
+    require(future.get() == 42, "submitBlocking should run inline on the runtime thread");
+    runtimeExecutor.shutdown().get();
+}
+
+void submitBlockingFlattensReturnedFutureFromCaller()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    const int value = runtimeExecutor.submitBlocking([](IRuntime &) {
+        return async::makeReadyFuture(42);
+    });
+
+    require(value == 42, "submitBlocking should flatten returned futures from callers");
+    runtimeExecutor.shutdown().get();
+}
+
+void submitBlockingFlattensReturnedFutureOnRuntimeThread()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto future = runtimeExecutor.submit([&runtimeExecutor](IRuntime &) {
+        return runtimeExecutor.submitBlocking([](IRuntime &) {
+            return async::makeReadyFuture(42);
+        });
+    });
+
+    require(future.get() == 42,
+            "submitBlocking should flatten returned futures on the runtime thread");
+    runtimeExecutor.shutdown().get();
+}
+
+void submitBlockingPropagatesReturnedFutureExceptionOnRuntimeThread()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto future = runtimeExecutor.submit([&runtimeExecutor](IRuntime &) {
+        return runtimeExecutor.submitBlocking([](IRuntime &) {
+            return async::makeExceptionFuture<int>(
+                std::make_exception_ptr(std::runtime_error("blocking returned")));
+        });
+    });
+
+    requireThrows<std::runtime_error>([&]() {
+        future.get();
+    }, "submitBlocking should propagate returned future exceptions on the runtime thread");
+
+    runtimeExecutor.shutdown().get();
+}
+
+void submitBlockingRejectsInvalidReturnedFutureOnRuntimeThread()
+{
+    auto runtime = std::make_unique<FakeRuntime>();
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
+
+    auto future = runtimeExecutor.submit([&runtimeExecutor](IRuntime &) {
+        return runtimeExecutor.submitBlocking([](IRuntime &) {
+            return async::Future<int>();
+        });
+    });
+
+    requireThrows<async::FutureInvalid>([&]() {
+        future.get();
+    }, "submitBlocking should reject invalid returned futures on the runtime thread");
+
+    runtimeExecutor.shutdown().get();
+}
+
 void shutdownRunsOnRuntimeThread()
 {
     auto events = std::make_shared<RuntimeEvents>();
@@ -211,42 +351,49 @@ void shutdownRunsOnRuntimeThread()
             "RuntimeExecutor should shutdown runtime on executor thread");
 }
 
-using TestCase = std::pair<const char *, std::function<void()>>;
+void shutdownIsIdempotent()
+{
+    auto events = std::make_shared<RuntimeEvents>();
+    auto runtime = std::make_unique<FakeRuntime>(events);
+    execution::RuntimeExecutor runtimeExecutor(std::move(runtime));
+    runtimeExecutor.initialize().get();
 
-std::vector<TestCase> testCases()
+    runtimeExecutor.shutdown().get();
+    runtimeExecutor.shutdown().get();
+
+    require(events->shutdownCount == 1, "RuntimeExecutor should shutdown runtime only once");
+}
+
+std::vector<execution_test::TestCase> testCases()
 {
     return {
         { "initializeRunsOnRuntimeThread", initializeRunsOnRuntimeThread },
         { "initializeFailureBecomesFutureException", initializeFailureBecomesFutureException },
+        { "initializeIsIdempotent", initializeIsIdempotent },
         { "submitRunsOnRuntimeThreadAndReturnsValue", submitRunsOnRuntimeThreadAndReturnsValue },
+        { "submitFlattensReturnedFuture", submitFlattensReturnedFuture },
+        { "submitPropagatesReturnedFutureException", submitPropagatesReturnedFutureException },
+        { "submitRejectsInvalidReturnedFuture", submitRejectsInvalidReturnedFuture },
         { "submitCapturesTaskException", submitCapturesTaskException },
         { "submitRejectsAfterShutdown", submitRejectsAfterShutdown },
+        { "submitBlockingRunsInlineOnRuntimeThread", submitBlockingRunsInlineOnRuntimeThread },
+        { "submitBlockingFlattensReturnedFutureFromCaller",
+          submitBlockingFlattensReturnedFutureFromCaller },
+        { "submitBlockingFlattensReturnedFutureOnRuntimeThread",
+          submitBlockingFlattensReturnedFutureOnRuntimeThread },
+        { "submitBlockingPropagatesReturnedFutureExceptionOnRuntimeThread",
+          submitBlockingPropagatesReturnedFutureExceptionOnRuntimeThread },
+        { "submitBlockingRejectsInvalidReturnedFutureOnRuntimeThread",
+          submitBlockingRejectsInvalidReturnedFutureOnRuntimeThread },
         { "shutdownRunsOnRuntimeThread", shutdownRunsOnRuntimeThread },
+        { "shutdownIsIdempotent", shutdownIsIdempotent },
     };
 }
 }
 
 int main()
 {
-    int failedCount = 0;
-    for (const TestCase &test : testCases()) {
-        try {
-            test.second();
-            std::cout << "[PASS] " << test.first << '\n';
-        } catch (const std::exception &e) {
-            ++failedCount;
-            std::cerr << "[FAIL] " << test.first << ": " << e.what() << '\n';
-        } catch (...) {
-            ++failedCount;
-            std::cerr << "[FAIL] " << test.first << ": unknown exception\n";
-        }
-    }
-
-    if (failedCount != 0) {
-        std::cerr << failedCount << " runtime executor test(s) failed.\n";
-        return 1;
-    }
-
-    std::cout << "All runtime executor tests passed.\n";
-    return 0;
+    return execution_test::runTests(testCases(),
+                                    "runtime executor",
+                                    "All runtime executor tests passed.");
 }

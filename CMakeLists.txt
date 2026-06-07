@@ -145,7 +145,12 @@ if (BUILD_TESTING)
     add_test(NAME async_future_tests COMMAND async_future_tests)
 
     add_executable(execution_tests
+        src/framework/execution/test/execution_integration_tests.cpp
         src/framework/execution/test/execution_tests.cpp
+        src/framework/execution/test/latest_lane_tests.cpp
+        src/framework/execution/test/merge_lane_tests.cpp
+        src/framework/execution/test/serial_lane_tests.cpp
+        src/framework/execution/test/task_scheduler_tests.cpp
     )
 
     target_include_directories(execution_tests PRIVATE

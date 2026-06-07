@@ -7,9 +7,16 @@ QT -= core gui
 INCLUDEPATH += $$PWD/../../..
 
 SOURCES += \
-    execution_tests.cpp
+    execution_integration_tests.cpp \
+    execution_tests.cpp \
+    latest_lane_tests.cpp \
+    merge_lane_tests.cpp \
+    serial_lane_tests.cpp \
+    task_scheduler_tests.cpp
 
 HEADERS += \
+    execution_test_cases.h \
+    test_harness.h \
     ../future/async.h \
     ../future/async_future.h \
     ../future/combinators.h \

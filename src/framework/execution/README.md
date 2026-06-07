@@ -19,9 +19,18 @@
 
 - `async::Promise<T>` / `async::Future<T>`：一次性异步结果通道。
 - `async::Executor`：continuation 或任务实际运行的位置。
+- `async::async(executor, func)`：把 callable 投递到 executor，并把普通值、`void` 或 `Future<T>` 返回值统一转换为 `Future<T>`。
 - `execution::TaskScheduler`：把普通函数提交到指定 executor，并返回 `Future<T>`。
 - `execution::SerialLane` / `LatestLane` / `MergeLane`：描述同一类任务连续提交时的排队、替换、合并策略。
 - `execution::RuntimeExecutor`：拥有一个 `IRuntime`，并把所有 runtime 调用固定到一个 `SingleThreadExecutor`。
+
+## 测试入口
+
+当前测试仍使用手写 runner，不依赖 QtTest：
+
+- `async_future_tests`：future、promise、executor、combinator、timeout、splitter。
+- `execution_tests`：TaskScheduler、SerialLane、LatestLane、MergeLane，以及 `TaskScheduler + Lane` 的集成链路。
+- `runtime_executor_tests`：RuntimeExecutor 初始化、提交、同步提交、shutdown 和返回 `Future<T>` 的 flatten 边界。
 
 ## 最小示例
 
